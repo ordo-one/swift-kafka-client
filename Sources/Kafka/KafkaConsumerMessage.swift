@@ -79,25 +79,25 @@ public struct KafkaConsumerMessage {
                 guard let pointer else {
                     preconditionFailure("index \(index) out of range: Headers is empty")
                 }
-                var keyPointer: UnsafePointer<CChar>?
+                var namePointer: UnsafePointer<CChar>?
                 var valuePointer: UnsafeRawPointer?
                 var valueSize = 0
-                let err = rd_kafka_header_get_all(pointer, index, &keyPointer, &valuePointer, &valueSize)
-                guard err == RD_KAFKA_RESP_ERR_NO_ERROR, let keyPointer else {
+                let err = rd_kafka_header_get_all(pointer, index, &namePointer, &valuePointer, &valueSize)
+                guard err == RD_KAFKA_RESP_ERR_NO_ERROR, let namePointer else {
                     preconditionFailure("Failed to read Kafka header at index \(index): \(err)")
                 }
-                let header = Header(key: keyPointer, value: valuePointer, valueSize: valueSize)
+                let header = Header(name: namePointer, value: valuePointer, valueSize: valueSize)
                 return _overrideLifetime(header, borrowing: self)
             }
         }
     }
 
-    /// A non-escapable, zero-copy view over a single Kafka header's key and value bytes.
+    /// A non-escapable, zero-copy view over a single Kafka header's name and value bytes.
     ///
     /// Obtained via ``Headers/subscript(_:)``; valid only within the enclosing ``withHeaders(_:)`` call.
     public struct Header: ~Escapable {
         @usableFromInline
-        let key: UnsafePointer<CChar>
+        let _name: UnsafePointer<CChar>
         @usableFromInline
         let value: UnsafeRawPointer?
         @usableFromInline
@@ -105,19 +105,31 @@ public struct KafkaConsumerMessage {
 
         @_lifetime(immortal)
         @usableFromInline
-        init(key: UnsafePointer<CChar>, value: UnsafeRawPointer?, valueSize: Int) {
-            self.key = key
+        init(name: UnsafePointer<CChar>, value: UnsafeRawPointer?, valueSize: Int) {
+            self._name = name
             self.value = value
             self.valueSize = valueSize
         }
 
-        /// The header name as raw UTF-8 bytes, zero-copy.
+        /// The header name, copied into a `String`.
         @inlinable
-        public var keyBytes: RawSpan {
+        public var name: String {
+            String(cString: _name)
+        }
+
+        /// The header name as a zero-copy UTF-8 span.
+        ///
+        /// librdkafka header names are always null-terminated and valid UTF-8.
+        @available(macOS 26.0, *)
+        @inlinable
+        public var nameBytes: UTF8Span {
             @_lifetime(borrow self)
             get {
-                let buf = UnsafeRawBufferPointer(start: UnsafeRawPointer(key), count: strlen(key))
-                return _overrideLifetime(RawSpan(_unsafeBytes: buf), borrowing: self)
+                let nameUInt8 = UnsafeRawPointer(_name).assumingMemoryBound(to: UInt8.self)
+                let buf = UnsafeBufferPointer<UInt8>(start: nameUInt8, count: strlen(_name))
+                let span = Span<UInt8>(_unsafeElements: buf)
+                let utf8 = try! UTF8Span(validating: span)
+                return _overrideLifetime(utf8, borrowing: self)
             }
         }
 
