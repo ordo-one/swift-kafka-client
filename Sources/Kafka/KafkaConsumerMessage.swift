@@ -125,8 +125,10 @@ public struct KafkaConsumerMessage {
         public var nameBytes: UTF8Span {
             @_lifetime(borrow self)
             get {
+                var nameEnd = _name
+                while nameEnd.pointee != 0 { nameEnd = nameEnd.advanced(by: 1) }
                 let nameUInt8 = UnsafeRawPointer(_name).assumingMemoryBound(to: UInt8.self)
-                let buf = UnsafeBufferPointer<UInt8>(start: nameUInt8, count: strlen(_name))
+                let buf = UnsafeBufferPointer<UInt8>(start: nameUInt8, count: _name.distance(to: nameEnd))
                 let span = Span<UInt8>(_unsafeElements: buf)
                 let utf8 = try! UTF8Span(validating: span)
                 return _overrideLifetime(utf8, borrowing: self)
