@@ -221,7 +221,7 @@ public struct KafkaConsumerConfiguration {
     }
 
     /// How long to postpone the next fetch request for a topic+partition in case the current fetch queue
-    /// thresholds (queued.min.messages or queued.max.messages.kbytes) have been exceded.
+    /// thresholds (queued.min.messages or queued.max.messages.kbytes) have been exceeded.
     /// This property may need to be decreased if the queue thresholds are set low and the application is
     /// experiencing long (~1s) delays between messages.
     /// Low values may increase CPU utilization.
