@@ -79,12 +79,16 @@ extension RDKafkaStatistics {
         let eofOffset: Int? // Last PARTITION_EOF signaled offset.
         let lastStableOffset: Int? // Partition's last stable offset on broker.
         let consumerLagStored: Int? // Difference between (hi_offset or ls_offset) and stored_offset.
+        let desired: Bool? // Partition is explicitly desired by the application.
+        let leaderBroker: Int? // Current leader broker id (-1 if unknown).
 
         enum CodingKeys: String, CodingKey {
             case committedOffset = "committed_offset"
             case eofOffset = "eof_offset"
             case lastStableOffset = "ls_offset"
             case consumerLagStored = "consumer_lag_stored"
+            case desired
+            case leaderBroker = "leader"
         }
 
         var lag: Int? {
@@ -150,14 +154,37 @@ extension RDKafkaStatistics {
 }
 
 extension RDKafkaStatistics {
+    /// The consumer can only fetch a partition through its current leader broker, so the cache is
+    /// stale whenever a partition we consume has no operational leader — a broker that leads nothing
+    /// we consume is irrelevant. A down leader resolves once Kafka re-elects from the ISR and
+    /// librdkafka points `leader` at an operational broker; replica sets are not exposed by stats.
     var consumerHealthStatus: KafkaConsumerHealthStatus {
-        if let brokers {
-            // Require all brokers to be operational
-            for broker in brokers.values where broker.nodeIdentifier != -1 {
-                if broker.isOperational == false {
+        guard let brokers else { return .healthy(lag: lag) }
+
+        let operationalByNode = Dictionary(
+            brokers.values.map { ($0.nodeIdentifier, $0.isOperational) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        var sawConsumedPartition = false
+        for topic in topics ?? [:] {
+            for (name, partition) in topic.value.partitions ?? [:]
+            where name != "-1" && partition.desired == true {
+                sawConsumedPartition = true
+                let leader = partition.leaderBroker ?? -1
+                if leader < 0 || operationalByNode[leader] != true {
                     return .stale
                 }
             }
+        }
+
+        // Before partition assignment there is nothing to consume yet; fall back to requiring at
+        // least one operational real broker so a fully down cluster is still reported as stale.
+        if !sawConsumedPartition {
+            let anyOperational = brokers.values.contains {
+                $0.nodeIdentifier != -1 && $0.isOperational == true
+            }
+            return anyOperational ? .healthy(lag: lag) : .stale
         }
 
         return .healthy(lag: lag)
