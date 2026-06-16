@@ -162,13 +162,13 @@ extension RDKafkaStatistics {
         guard let brokers else { return .healthy(lag: lag) }
 
         let operationalByNode = Dictionary(
-            brokers.values.map { ($0.nodeIdentifier, $0.isOperational) },
+            brokers.values.map { ($0.nodeIdentifier, $0.isOperational == true) },
             uniquingKeysWith: { first, _ in first }
         )
 
         var sawConsumedPartition = false
-        for topic in topics ?? [:] {
-            for (name, partition) in topic.value.partitions ?? [:]
+        for (_, topic) in topics ?? [:] {
+            for (name, partition) in topic.partitions ?? [:]
             where name != "-1" && partition.desired == true {
                 sawConsumedPartition = true
                 let leader = partition.leaderBroker ?? -1
