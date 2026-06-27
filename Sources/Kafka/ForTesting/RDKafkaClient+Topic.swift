@@ -119,8 +119,16 @@ extension RDKafkaClient {
     /// - Parameter timeout: Timeout in milliseconds.
     /// - Throws: A ``KafkaError`` if the partition increase failed.
     public func _createPartitions(topicName: String, totalCount: Int32, timeout: Int32) throws {
+        guard totalCount > 0 else {
+            throw KafkaError.rdKafkaError(wrapping: RD_KAFKA_RESP_ERR__INVALID_ARG, errorMessage: "Total partition count must be greater than zero")
+        }
+
         let errorChars = UnsafeMutablePointer<CChar>.allocate(capacity: RDKafkaClient.stringSize)
-        defer { errorChars.deallocate() }
+        errorChars.initialize(repeating: 0, count: RDKafkaClient.stringSize)
+        defer {
+            errorChars.deinitialize(count: RDKafkaClient.stringSize)
+            errorChars.deallocate()
+        }
 
         guard let newPartitions = rd_kafka_NewPartitions_new(
             topicName,
@@ -172,7 +180,13 @@ extension RDKafkaClient {
 
             let topicResultError = rd_kafka_topic_result_error(topicResult)
             guard topicResultError == RD_KAFKA_RESP_ERR_NO_ERROR else {
-                throw KafkaError.rdKafkaError(wrapping: topicResultError, errorMessage: "Failed to create partitions for topic '\(topicName)'")
+                let errorString: String
+                if let cErrorString = rd_kafka_topic_result_error_string(topicResult) {
+                    errorString = "Failed to create partitions for topic '\(topicName)': \(String(cString: cErrorString))"
+                } else {
+                    errorString = "Failed to create partitions for topic '\(topicName)'"
+                }
+                throw KafkaError.rdKafkaError(wrapping: topicResultError, errorMessage: errorString)
             }
 
             let receivedTopicName = String(cString: rd_kafka_topic_result_name(topicResult))
