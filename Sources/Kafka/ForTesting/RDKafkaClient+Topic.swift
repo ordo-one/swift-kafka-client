@@ -112,6 +112,76 @@ extension RDKafkaClient {
         }
     }
 
+    /// Increase the number of partitions of an existing topic.
+    /// Blocks for a maximum of `timeout` milliseconds.
+    /// - Parameter topicName: Topic whose partition count is being grown.
+    /// - Parameter totalCount: New total number of partitions (not a delta). Kafka can only grow, never shrink.
+    /// - Parameter timeout: Timeout in milliseconds.
+    /// - Throws: A ``KafkaError`` if the partition increase failed.
+    public func _createPartitions(topicName: String, totalCount: Int32, timeout: Int32) throws {
+        let errorChars = UnsafeMutablePointer<CChar>.allocate(capacity: RDKafkaClient.stringSize)
+        defer { errorChars.deallocate() }
+
+        guard let newPartitions = rd_kafka_NewPartitions_new(
+            topicName,
+            Int(totalCount),
+            errorChars,
+            RDKafkaClient.stringSize
+        ) else {
+            let errorString = String(cString: errorChars)
+            throw KafkaError.topicCreation(reason: errorString)
+        }
+        defer { rd_kafka_NewPartitions_destroy(newPartitions) }
+
+        try self.withKafkaHandlePointer { kafkaHandle in
+            let resultQueue = rd_kafka_queue_new(kafkaHandle)
+            defer { rd_kafka_queue_destroy(resultQueue) }
+
+            var newPartitionsArray: [OpaquePointer?] = [newPartitions]
+            rd_kafka_CreatePartitions(
+                kafkaHandle,
+                &newPartitionsArray,
+                1,
+                nil,
+                resultQueue
+            )
+
+            guard let resultEvent = rd_kafka_queue_poll(resultQueue, timeout) else {
+                throw KafkaError.topicCreation(reason: "No CreatePartitions result after timeout")
+            }
+            defer { rd_kafka_event_destroy(resultEvent) }
+
+            let resultCode = rd_kafka_event_error(resultEvent)
+            guard resultCode == RD_KAFKA_RESP_ERR_NO_ERROR else {
+                throw KafkaError.rdKafkaError(wrapping: resultCode)
+            }
+
+            guard let partitionsResultEvent = rd_kafka_event_CreatePartitions_result(resultEvent) else {
+                throw KafkaError.topicCreation(reason: "Received event that is not of type rd_kafka_CreatePartitions_result_t")
+            }
+
+            var resultTopicCount = 0
+            let topicResults = rd_kafka_CreatePartitions_result_topics(
+                partitionsResultEvent,
+                &resultTopicCount
+            )
+
+            guard resultTopicCount == 1, let topicResult = topicResults?[0] else {
+                throw KafkaError.topicCreation(reason: "Received less/more than one topic result")
+            }
+
+            let topicResultError = rd_kafka_topic_result_error(topicResult)
+            guard topicResultError == RD_KAFKA_RESP_ERR_NO_ERROR else {
+                throw KafkaError.rdKafkaError(wrapping: topicResultError, errorMessage: "Failed to create partitions for topic '\(topicName)'")
+            }
+
+            let receivedTopicName = String(cString: rd_kafka_topic_result_name(topicResult))
+            guard receivedTopicName == topicName else {
+                throw KafkaError.topicCreation(reason: "Received topic result for topic with different name")
+            }
+        }
+    }
+
     /// Delete a topic.
     /// Blocks for a maximum of `timeout` milliseconds.
     /// - Parameter topic: Topic to delete.
