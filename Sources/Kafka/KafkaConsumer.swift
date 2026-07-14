@@ -485,8 +485,10 @@ public final class KafkaConsumer: Sendable, Service {
     ///   timestamp for that partition (the end offset if none is newer).
     public func offsetsForTimes(_ list: KafkaTopicList, timeout: Duration = .seconds(5)) async throws -> KafkaTopicList {
         let client = try self.client()
-        try await client.offsetsForTimes(topicPartitionList: list.list, timeout: timeout)
-        return list
+        // KafkaTopicList wraps a reference-type list, so resolve into a copy to keep value semantics.
+        let resolved = list.list.withListPointer { RDKafkaTopicPartitionList(from: $0) }
+        try await client.offsetsForTimes(topicPartitionList: resolved, timeout: timeout)
+        return KafkaTopicList(from: resolved)
     }
 
     public func metadata() async throws -> KafkaMetadata {
