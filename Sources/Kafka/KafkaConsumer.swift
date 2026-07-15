@@ -479,6 +479,18 @@ public final class KafkaConsumer: Sendable, Service {
         }
     }
 
+    /// Resolve per-partition start offsets for a timestamp.
+    /// - Parameter list: Each entry's offset must hold the target timestamp in milliseconds.
+    /// - Returns: The same list with each offset resolved to the earliest record at or after the
+    ///   timestamp for that partition (the end offset if none is newer).
+    public func offsetsForTimes(_ list: KafkaTopicList, timeout: Duration = .seconds(5)) async throws -> KafkaTopicList {
+        let client = try self.client()
+        // KafkaTopicList wraps a reference-type list, so resolve into a copy to keep value semantics.
+        let resolved = list.list.withListPointer { RDKafkaTopicPartitionList(from: $0) }
+        try await client.offsetsForTimes(topicPartitionList: resolved, timeout: timeout)
+        return KafkaTopicList(from: resolved)
+    }
+
     public func metadata() async throws -> KafkaMetadata {
         try await client().metadata()
     }
