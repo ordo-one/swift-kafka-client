@@ -461,19 +461,22 @@ public final class RDKafkaClient: Sendable {
         // dedicated `.partitionEOF` event carrying the topic/partition/offset that reached
         // its end (the consumer may be subscribed to more than one topic).
         if err == RD_KAFKA_RESP_ERR__PARTITION_EOF {
-            let eofPointer = rd_kafka_event_topic_partition(event)
-            defer { rd_kafka_topic_partition_destroy(eofPointer) }
-            let topicPartition: TopicPartition =
-                if let eof = eofPointer?.pointee {
-                    TopicPartition(
-                        eof.topic.map { String(cString: $0) } ?? "",
-                        KafkaPartition(rawValue: Int(eof.partition)),
-                        KafkaOffset(rawValue: Int(eof.offset))
-                    )
-                } else {
+            // `rd_kafka_event_topic_partition` returns a newly allocated container that we own
+            // (and must destroy), or `nil` if the event carries no partition.
+            guard let eofPointer = rd_kafka_event_topic_partition(event) else {
+                return .partitionEOF(
                     TopicPartition("", .unassigned, KafkaOffset(rawValue: Int(RD_KAFKA_OFFSET_INVALID)))
-                }
-            return .partitionEOF(topicPartition)
+                )
+            }
+            defer { rd_kafka_topic_partition_destroy(eofPointer) }
+            let eof = eofPointer.pointee
+            return .partitionEOF(
+                TopicPartition(
+                    eof.topic.map { String(cString: $0) } ?? "",
+                    KafkaPartition(rawValue: Int(eof.partition)),
+                    KafkaOffset(rawValue: Int(eof.offset))
+                )
+            )
         }
 
         let errorString = if let error = rd_kafka_err2str(rd_kafka_event_error(event)) {
