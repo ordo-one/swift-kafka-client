@@ -37,7 +37,7 @@ import Logging
 
 final class KafkaTests: XCTestCase {
     // Read environment variables to get information about the test Kafka server
-    let kafkaHost: String = ProcessInfo.processInfo.environment["KAFKA_HOST"] ?? "linux-dev"
+    let kafkaHost: String = ProcessInfo.processInfo.environment["KAFKA_HOST"] ?? "linux"
     let kafkaPort: Int = .init(ProcessInfo.processInfo.environment["KAFKA_PORT"] ?? "9092")!
     var bootstrapBrokerAddress: KafkaConfiguration.BrokerAddress!
     var producerConfig: KafkaProducerConfiguration!
@@ -194,7 +194,7 @@ final class KafkaTests: XCTestCase {
 
                 consumeLoop: for await event in consumerEvents {
                     switch event {
-                    case var .fetch(fetch):
+                    case let .fetch(fetch):
                         fetch.withMessages { message in
                             consumedMessages.append((message.topic, message.key, message.value))
                         }
@@ -257,7 +257,8 @@ final class KafkaTests: XCTestCase {
             // Emit librdkafka debug logs (delivered via `.log` events and forwarded to the
             // `.kafkaTest` logger, which is at `.debug` level). Focused on the group/rebalance
             // machinery; use `[.all]` for everything.
-            config.debugOptions = [.cgrp, .consumer, .broker]
+
+            // config.debugOptions = [.cgrp, .consumer, .broker]
             return config
         }
 

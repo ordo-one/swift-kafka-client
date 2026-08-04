@@ -204,13 +204,6 @@ extension KafkaConsumerStream {
             return try body(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(start: msg.key, count: msg.key_len)))
         }
 
-        /*
-        /// The headers of the message, copied into an array.
-        public var headers: [KafkaHeader] {
-            return (try? Self.extractHeaders(fromMessage: messagePointer)) ?? []
-        }
-        */
-        
         /// Calls `body` with a zero-copy ``Headers`` view over the message's headers.
         ///
         /// The ``Headers`` value — and any ``Header`` or ``RawSpan`` derived from it —

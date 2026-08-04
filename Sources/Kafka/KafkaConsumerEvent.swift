@@ -97,20 +97,20 @@ public enum RebalanceAction : Sendable, Hashable {
     case error(KafkaRebalanceProtocol, KafkaTopicList, KafkaError)
 }
 
-public struct KafkaFetch: @unchecked Sendable {
-    var event: OpaquePointer?
+public final class KafkaFetch: @unchecked Sendable {
+    private let event: OpaquePointer?
 
     init(_ event: OpaquePointer) {
         self.event = event
     }
 
-    public mutating func withMessages(
+    deinit {
+        rd_kafka_event_destroy(self.event)
+    }
+
+    public func withMessages(
         _ body: (borrowing KafkaConsumerStream.Message) throws -> Void
     ) rethrows {
-        defer {
-            rd_kafka_event_destroy(event)
-            self.event = nil
-        }
         while let message = rd_kafka_event_message_next(event) {
             try body(.init(messagePointer: message))
         }

@@ -415,7 +415,7 @@ public final class RDKafkaClient: Sendable {
                 self.handleOffsetCommitEvent(event)
                 shouldSleep = false
             case .rebalance:
-                self.logger.info("rebalance received (RDClient)")
+                self.logger.debug("rebalance received (RDClient)")
                 events.append(self.handleRebalance(event))
 //            case .error:
 //                #if true
