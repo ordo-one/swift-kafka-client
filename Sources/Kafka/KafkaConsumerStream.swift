@@ -12,6 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+import Dispatch
 import Logging
 
 /// A single source delivering *all* events of one consumer — fetched messages, rebalances,
@@ -50,6 +51,7 @@ public final class KafkaConsumerStream: @unchecked Sendable {
     private let configPollInterval: Duration
     private let metrics: KafkaConfiguration.ConsumerMetrics
     private let healthStatusEnabled: Bool
+    private let executor: DispatchQueueTaskExecutor
 
     // Poll state: only ever touched by `next()`, which is single-consumer. This is why the
     // `Sendable` conformance is `@unchecked` — no lock guards these, the contract does.
@@ -88,6 +90,10 @@ public final class KafkaConsumerStream: @unchecked Sendable {
         self.metrics = configuration.metrics
         self.healthStatusEnabled = configuration.healthStatusInterval != nil
 
+        self.executor = DispatchQueueTaskExecutor(
+            DispatchQueue(label: "com.swift-server.swift-kafka.message-consumer")
+        )
+
         // Set up the connection from the configuration, exactly as `KafkaConsumer` does at
         // the top of its `run()`. There is no `run()` here, so this is the only such hook.
         switch configuration.consumptionStrategy._internal {
@@ -125,7 +131,15 @@ public final class KafkaConsumerStream: @unchecked Sendable {
                 return nil
             }
             if idx == 0 {
-                let shouldSleep = client.eventPoll(events: &events)
+                let shouldSleep: Bool
+                if #available(macOS 15.0, iOS 18.0, watchOS 11.0, tvOS 18.0, visionOS 2.0, *) {
+                    shouldSleep = await withTaskExecutorPreference(executor) {
+                        client.eventPoll(events: &events)
+                    }
+                } else {
+                    shouldSleep = client.eventPoll(events: &events)
+                }
+
                 if shouldSleep {
                     pollInterval = Swift.min(configPollInterval, pollInterval * 2)
                     let clock = ContinuousClock()
@@ -145,7 +159,7 @@ public final class KafkaConsumerStream: @unchecked Sendable {
             idx += 1
 
             if idx == events.count {
-                events.removeAll()
+                events.removeAll(keepingCapacity: true)
                 idx = 0
             }
 
