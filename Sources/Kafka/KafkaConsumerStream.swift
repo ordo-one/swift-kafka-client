@@ -32,8 +32,10 @@ import Logging
 /// Calling ``nextEvent()`` *is* the poll loop; there is no separate service task to run.
 ///
 /// The element is ``KafkaConsumerEvent``, *not* a message: records arrive batched inside
-/// ``KafkaConsumerEvent/fetch(_:)`` (see ``KafkaFetch/withMessages(_:)``) alongside
-/// rebalance, EOF and error events. This is what distinguishes the type from
+/// ``KafkaConsumerEvent/fetch(_:)``, which is a `Sequence` of ``KafkaConsumerStream/Message``
+/// (iterate it directly, or use ``KafkaFetch/withMessages(_:)``), alongside rebalance, EOF and
+/// error events. A message keeps its fetch event alive, so it can be collected and read after the
+/// event has been handled. This is what distinguishes the type from
 /// ``KafkaConsumer``, which splits the same information across ``KafkaConsumer/messages``
 /// and a separate ``KafkaConsumerEvents`` sequence and needs its `run()` method serviced.
 ///

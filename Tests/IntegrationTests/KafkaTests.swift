@@ -187,16 +187,14 @@ final class KafkaTests: XCTestCase {
 
             // Consumer Task: drain the single events sequence, extracting records from `.fetch` events.
             group.addTask {
-                // The messages returned by `withMessages` point into the fetch event's memory,
-                // which is freed when the closure returns, so copy the fields out immediately.
-                var consumedMessages = [(topic: String, key: ByteBuffer?, value: ByteBuffer?)]()
+                // `KafkaConsumerStream.Message` is escapable: it keeps the fetch event it points
+                // into alive, so the messages can be collected and read after the consume loop.
+                var consumedMessages = [KafkaConsumerStream.Message]()
 
                 consumeLoop: while let event = await consumerEvents.nextEvent() {
                     switch event {
                     case let .fetch(fetch):
-                        fetch.withMessages { message in
-                            consumedMessages.append((message.topic, message.key, message.value))
-                        }
+                        consumedMessages.append(contentsOf: fetch)
                         if consumedMessages.count >= testMessages.count {
                             break consumeLoop
                         }

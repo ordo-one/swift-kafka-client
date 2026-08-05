@@ -97,8 +97,17 @@ public enum RebalanceAction : Sendable, Hashable {
     case error(KafkaRebalanceProtocol, KafkaTopicList, KafkaError)
 }
 
+/// A batch of consumed records, delivered as ``KafkaConsumerEvent/fetch(_:)``.
+///
+/// `KafkaFetch` owns the underlying librdkafka event and frees it in `deinit`. The messages it
+/// yields keep it alive, so a ``KafkaConsumerStream/Message`` may outlive the iteration that
+/// produced it.
+///
+/// - Important: Single-pass. Iterating consumes the event's messages, so a `KafkaFetch` can only be
+///   iterated once — a second pass yields nothing. Iterate from one task at a time.
 public final class KafkaFetch: @unchecked Sendable {
-    private let event: OpaquePointer?
+    @usableFromInline
+    let event: OpaquePointer
 
     init(_ event: OpaquePointer) {
         self.event = event
@@ -107,13 +116,28 @@ public final class KafkaFetch: @unchecked Sendable {
     deinit {
         rd_kafka_event_destroy(self.event)
     }
+}
 
-    public func withMessages(
-        _ body: (borrowing KafkaConsumerStream.Message) throws -> Void
-    ) rethrows {
-        while let message = rd_kafka_event_message_next(event) {
-            try body(.init(messagePointer: message))
+extension KafkaFetch: Sequence {
+    public struct Iterator: IteratorProtocol {
+        /// Keeps the event alive for the duration of the iteration.
+        @usableFromInline
+        let fetch: KafkaFetch
+
+        init(_ fetch: KafkaFetch) {
+            self.fetch = fetch
         }
+
+        public mutating func next() -> KafkaConsumerStream.Message? {
+            guard let message = rd_kafka_event_message_next(self.fetch.event) else {
+                return nil
+            }
+            return .init(fetch: self.fetch, messagePointer: message)
+        }
+    }
+
+    public func makeIterator() -> Iterator {
+        Iterator(self)
     }
 }
 

@@ -18,7 +18,18 @@ import struct Foundation.Date
 import typealias Foundation.TimeInterval
 
 extension KafkaConsumerStream {
-    public struct Message: ~Escapable {
+    /// A single record consumed from Kafka, obtained by iterating a ``KafkaFetch``.
+    ///
+    /// The message points directly into the librdkafka fetch event's memory — no bytes are copied.
+    /// It holds a reference to the owning ``KafkaFetch``, so it stays valid for as long as it is
+    /// alive and may be stored or passed to another task. Note that keeping a message alive keeps
+    /// the whole fetch event it came from alive with it.
+    public struct Message {
+        /// Keeps the enclosing `rd_kafka_event_t` — and therefore the key, payload and header bytes
+        /// this message points into — alive for as long as the message exists.
+        @usableFromInline
+        let fetch: KafkaFetch
+
         @usableFromInline
         let messagePointer: UnsafePointer<rd_kafka_message_t>
 
@@ -130,8 +141,15 @@ extension KafkaConsumerStream {
             case logAppendTime(Date)
         }
 
-        init(messagePointer: UnsafePointer<rd_kafka_message_t>) {
+        init(fetch: KafkaFetch, messagePointer: UnsafePointer<rd_kafka_message_t>) {
+            self.fetch = fetch
             self.messagePointer = messagePointer
+
+            // Force librdkafka's lazy header parse now, while we are still on the polling task:
+            // `rd_kafka_message_headers` mutates the message in place on its first call, so a
+            // `Sendable` `Message` must never be the first caller from an arbitrary task.
+            var headersPointer: OpaquePointer?
+            _ = rd_kafka_message_headers(messagePointer, &headersPointer)
         }
 
         /// If ``true``, means it is not a message but tombstone.
@@ -234,3 +252,10 @@ extension KafkaConsumerStream {
         }
     }
 }
+
+// MARK: - KafkaConsumerStream.Message + Sendable
+
+// Safe because the referenced `rd_kafka_message_t` is read-only once received, the `fetch` reference
+// keeps it alive, and the one field librdkafka mutates lazily on read (the parsed headers) is forced
+// in `init` while still on the polling task.
+extension KafkaConsumerStream.Message: @unchecked Sendable {}
