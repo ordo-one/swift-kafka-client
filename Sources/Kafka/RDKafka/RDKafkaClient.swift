@@ -678,6 +678,21 @@ public final class RDKafkaClient: Sendable {
         }
     }
 
+    /// Look up offsets by timestamp for the given partitions.
+    /// - Parameter topicPartitionList: Each entry's offset must hold the target timestamp in
+    ///   milliseconds on input; on return it holds the earliest offset whose timestamp is at or
+    ///   after that value, or the end offset if none is newer.
+    func offsetsForTimes(topicPartitionList: RDKafkaTopicPartitionList, timeout: Duration) async throws {
+        assert(timeout >= .zero, "Timeout must be positive")
+
+        let result = await performBlockingCall(queue: self.gcdQueue) {
+            topicPartitionList.withListPointer { rd_kafka_offsets_for_times(self.kafkaHandle, $0, Int32(max(timeout, .zero).inMilliseconds)) }
+        }
+        if result != RD_KAFKA_RESP_ERR_NO_ERROR {
+            throw KafkaError.rdKafkaError(wrapping: result)
+        }
+    }
+
     /// Subscribe to topic set using balanced consumer groups.
     /// - Parameter topicPartitionList: Pointer to a list of topics + partition pairs.
     func subscribe(topicPartitionList: RDKafkaTopicPartitionList) throws {
