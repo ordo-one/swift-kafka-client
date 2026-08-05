@@ -14,19 +14,21 @@
 
 import Logging
 
-/// A single asynchronous sequence delivering *all* events of one consumer — fetched
-/// messages, rebalances, partition EOF and errors — so that the consumer can be driven
-/// from a single loop:
+/// A single source delivering *all* events of one consumer — fetched messages, rebalances,
+/// partition EOF and errors — so that the consumer can be driven from a single loop:
 ///
 /// ```swift
-/// let stream = try KafkaConsumerStream(configuration: configuration, logger: logger)
-/// try stream.subscribe(["topic"])
-/// for await event in stream {
+/// let stream = try await KafkaConsumerStream(configuration: configuration, logger: logger)
+/// while let event = await stream.next() {
 ///     switch event { ... }
 /// }
 /// ```
 ///
-/// Iterating the stream *is* the poll loop; there is no separate service task to run.
+/// The topics (or partitions) to consume come from
+/// ``KafkaConsumerConfiguration/consumptionStrategy``: the initializer subscribes for
+/// `.group` and assigns for `.partitions`, so there is nothing to subscribe to by hand.
+///
+/// Calling ``next()`` *is* the poll loop; there is no separate service task to run.
 ///
 /// The element is ``KafkaConsumerEvent``, *not* a message: records arrive batched inside
 /// ``KafkaConsumerEvent/fetch(_:)`` (see ``KafkaFetch/withMessages(_:)``) alongside
@@ -34,113 +36,29 @@ import Logging
 /// ``KafkaConsumer``, which splits the same information across ``KafkaConsumer/messages``
 /// and a separate ``KafkaConsumerEvents`` sequence and needs its `run()` method serviced.
 ///
-/// - Important: The stream subscribes to `.rebalance`, which turns off librdkafka's
+/// - Important: The stream enables `.rebalance` events, which turns off librdkafka's
 ///   automatic partition assignment. The caller is therefore responsible for
 ///   (un)assigning partitions in response to every ``KafkaConsumerEvent/rebalance(_:)``
 ///   event, otherwise the consumer is never assigned any partitions and consumes nothing.
-public struct KafkaConsumerStream: AsyncSequence, Sendable {
-    public typealias Element = KafkaConsumerEvent
-
+///
+/// - Important: ``next()`` must be called from one task at a time — see its own
+///   documentation.
+public final class KafkaConsumerStream: @unchecked Sendable {
     /// Internal: used by `KafkaTransaction` to reach the consumer's kafka handle when
     /// committing consumed offsets transactionally (`send(offsets:forConsumer:)`).
     let client: RDKafkaClient
-    private let pollInterval: Duration
+    private let configPollInterval: Duration
     private let metrics: KafkaConfiguration.ConsumerMetrics
     private let healthStatusEnabled: Bool
 
-    public struct AsyncIterator: AsyncIteratorProtocol {
-        private let client: RDKafkaClient
-        private let configPollInterval: Duration
-        private var events = [RDKafkaClient.KafkaEvent]()
-        private var idx = 0
-        private var pollInterval: Duration
-        private let metrics: KafkaConfiguration.ConsumerMetrics
-        private let healthStatusEnabled: Bool
+    // Poll state: only ever touched by `next()`, which is single-consumer. This is why the
+    // `Sendable` conformance is `@unchecked` — no lock guards these, the contract does.
+    private var events = [RDKafkaClient.KafkaEvent]()
+    private var idx = 0
+    /// Current backoff, adapted on every poll; never exceeds `configPollInterval`.
+    private var pollInterval: Duration
 
-        init(
-            _ client: RDKafkaClient,
-            _ configPollInterval: Duration,
-            _ metrics: KafkaConfiguration.ConsumerMetrics,
-            _ healthStatusEnabled: Bool
-        ) {
-            self.client = client
-            self.configPollInterval = configPollInterval
-            self.pollInterval = configPollInterval
-            self.metrics = metrics
-            self.healthStatusEnabled = healthStatusEnabled
-        }
-
-        public mutating func next() async -> KafkaConsumerEvent? {
-            while true {
-                // Honor structured-concurrency cancellation: end the sequence so callers
-                // iterating in a cancelled task (or a cancelled task group) stop cleanly.
-                if Task.isCancelled {
-                    return nil
-                }
-                if idx == 0 {
-                    let shouldSleep = client.eventPoll(events: &events)
-                    if shouldSleep {
-                        pollInterval = Swift.min(configPollInterval, pollInterval * 2)
-                        let clock = ContinuousClock()
-                        try? await clock.sleep(until: clock.now.advanced(by: pollInterval))
-                    } else {
-                        pollInterval = Swift.max(pollInterval / 3, .microseconds(1))
-                        await Task.yield()
-                    }
-
-                    // The poll may not have produced any events; go back and poll again.
-                    if events.isEmpty {
-                        continue
-                    }
-                }
-
-                let event = events[idx]
-                idx += 1
-
-                if idx == events.count {
-                    events.removeAll()
-                    idx = 0
-                }
-
-                switch event {
-                case let .fetch(ptr):
-                    return .fetch(.init(ptr))
-
-                case let .partitionEOF(topicPartition):
-                    return .partitionEOF(topicPartition)
-
-                case .deliveryReport:
-                    break
-
-                case let .statistics(statistics):
-                    metrics.update(with: statistics)
-                    if healthStatusEnabled {
-                        return .healthStatus(statistics.consumerHealthStatus)
-                    }
-
-                case let .rebalance(action):
-                    return .rebalance(action)
-
-                case let .error(error):
-                    return .error(error)
-                }
-            }
-        }
-    }
-
-    private init(
-        _ client: RDKafkaClient,
-        _ pollInterval: Duration,
-        _ metrics: KafkaConfiguration.ConsumerMetrics,
-        _ healthStatusEnabled: Bool
-    ) {
-        self.client = client
-        self.pollInterval = pollInterval
-        self.metrics = metrics
-        self.healthStatusEnabled = healthStatusEnabled
-    }
-
-    public init(configuration: KafkaConsumerConfiguration, logger: Logger) throws {
+    public init(configuration: KafkaConsumerConfiguration, logger: Logger) async throws {
         // `.rebalance` makes librdkafka deliver assign/revoke events on the queue instead
         // of assigning partitions automatically; the caller must then (un)assign partitions
         // itself in response to each `.rebalance` event (see the `assign`/`incrementalAssign`
@@ -164,24 +82,96 @@ public struct KafkaConsumerStream: AsyncSequence, Sendable {
             singleQueue: true
         )
 
-        self.init(
-            client,
-            configuration.pollInterval,
-            configuration.metrics,
-            configuration.healthStatusInterval != nil
-        )
-    }
+        self.client = client
+        self.configPollInterval = configuration.pollInterval
+        self.pollInterval = configuration.pollInterval
+        self.metrics = configuration.metrics
+        self.healthStatusEnabled = configuration.healthStatusInterval != nil
 
-    public func makeAsyncIterator() -> AsyncIterator {
-        AsyncIterator(client, pollInterval, metrics, healthStatusEnabled)
-    }
+        // Set up the connection from the configuration, exactly as `KafkaConsumer` does at
+        // the top of its `run()`. There is no `run()` here, so this is the only such hook.
+        switch configuration.consumptionStrategy._internal {
+        case .group(groupID: _, topics: let topics):
+            guard !topics.isEmpty else {
+                break
+            }
+            let subscription = RDKafkaTopicPartitionList()
+            for topic in topics {
+                subscription.add(topic: topic, partition: KafkaPartition.unassigned)
+            }
+            try client.subscribe(topicPartitionList: subscription)
 
-    public func subscribe(_ topics: [String]) throws {
-        let subscription = RDKafkaTopicPartitionList()
-        for topic in topics {
-            subscription.add(topic: topic, partition: KafkaPartition.unassigned)
+        case .partitions(_, let partitions):
+            let assignment = RDKafkaTopicPartitionList()
+            for partition in partitions {
+                assignment.setOffset(topic: partition.topic, partition: partition.partition, offset: partition.offset)
+            }
+            try await client.assign(topicPartitionList: assignment)
         }
-        try client.subscribe(topicPartitionList: subscription)
+    }
+
+    /// Poll for the next event, waiting until one is available.
+    ///
+    /// - Returns: The next ``KafkaConsumerEvent``, or `nil` once the calling task is
+    ///   cancelled — so a `while let` loop ends cleanly on cancellation.
+    ///
+    /// - Important: Single-consumer. Calling this concurrently from more than one task
+    ///   splits the event stream between the callers and is not supported.
+    public func next() async -> KafkaConsumerEvent? {
+        while true {
+            // Honor structured-concurrency cancellation: end the sequence so callers
+            // iterating in a cancelled task (or a cancelled task group) stop cleanly.
+            if Task.isCancelled {
+                return nil
+            }
+            if idx == 0 {
+                let shouldSleep = client.eventPoll(events: &events)
+                if shouldSleep {
+                    pollInterval = Swift.min(configPollInterval, pollInterval * 2)
+                    let clock = ContinuousClock()
+                    try? await clock.sleep(until: clock.now.advanced(by: pollInterval))
+                } else {
+                    pollInterval = Swift.max(pollInterval / 3, .microseconds(1))
+                    await Task.yield()
+                }
+
+                // The poll may not have produced any events; go back and poll again.
+                if events.isEmpty {
+                    continue
+                }
+            }
+
+            let event = events[idx]
+            idx += 1
+
+            if idx == events.count {
+                events.removeAll()
+                idx = 0
+            }
+
+            switch event {
+            case let .fetch(ptr):
+                return .fetch(.init(ptr))
+
+            case let .partitionEOF(topicPartition):
+                return .partitionEOF(topicPartition)
+
+            case .deliveryReport:
+                break
+
+            case let .statistics(statistics):
+                metrics.update(with: statistics)
+                if healthStatusEnabled {
+                    return .healthStatus(statistics.consumerHealthStatus)
+                }
+
+            case let .rebalance(action):
+                return .rebalance(action)
+
+            case let .error(error):
+                return .error(error)
+            }
+        }
     }
 
     // MARK: - Rebalance handling

@@ -160,12 +160,11 @@ final class KafkaTests: XCTestCase {
         consumerConfig.autoOffsetReset = .beginning // Always read topics from beginning
         consumerConfig.broker.addressFamily = .v4
 
-        // The initializer only creates the client; it does not subscribe on its own.
-        let consumerEvents = try KafkaConsumerStream(
+        // The initializer subscribes to the topics from `consumptionStrategy`.
+        let consumerEvents = try await KafkaConsumerStream(
             configuration: consumerConfig,
             logger: .kafkaTest
         )
-        try consumerEvents.subscribe([self.uniqueTestTopic])
 
         // The events sequence is not a `Service`, so only the producer is run in the group.
         let serviceGroupConfiguration = ServiceGroupConfiguration(services: [producer], logger: .kafkaTest)
@@ -192,7 +191,7 @@ final class KafkaTests: XCTestCase {
                 // which is freed when the closure returns, so copy the fields out immediately.
                 var consumedMessages = [(topic: String, key: ByteBuffer?, value: ByteBuffer?)]()
 
-                consumeLoop: for await event in consumerEvents {
+                consumeLoop: while let event = await consumerEvents.next() {
                     switch event {
                     case let .fetch(fetch):
                         fetch.withMessages { message in
@@ -267,12 +266,12 @@ final class KafkaTests: XCTestCase {
         let (ready, readyContinuation) = AsyncStream<Void>.makeStream()
         let (consumer2HasPartitions, consumer2Continuation) = AsyncStream<Void>.makeStream()
 
-        // Both consumers are retained in this outer scope for the whole test, so a task
-        // returning does not deinit its client and trigger a spurious re-rebalance.
-        // Creating the sequence does not join the group — only `subscribe` does.
-        let consumer1Events = try KafkaConsumerStream(configuration: makeConfig(), logger: .kafkaTest)
-        let consumer2Events = try KafkaConsumerStream(configuration: makeConfig(), logger: .kafkaTest)
-        try consumer1Events.subscribe([topic])
+        // Creating the sequence joins the group (the initializer subscribes to the topics in
+        // the configuration), so consumer 2 is deliberately *not* created here — its task
+        // creates it only after `ready`, which is what staggers the two joins. Consumer 1 is
+        // retained in this outer scope for the whole test, so its task returning does not
+        // deinit its client and trigger a spurious re-rebalance.
+        let consumer1Events = try await KafkaConsumerStream(configuration: makeConfig(), logger: .kafkaTest)
 
         // Each task returns `(consumerId, finalPartitionCount)`.
         let counts = try await withThrowingTaskGroup(of: (Int, Int).self) { group in
@@ -283,7 +282,7 @@ final class KafkaTests: XCTestCase {
             // reports whatever it holds at that point.
             group.addTask {
                 var assigned = 0
-                for await event in consumer1Events {
+                while let event = await consumer1Events.next() {
                     switch event {
                     case .rebalance(let action):
                         // The caller owns partition (un)assignment (cooperative assignor).
@@ -319,11 +318,12 @@ final class KafkaTests: XCTestCase {
                 var iterator = ready.makeAsyncIterator()
                 _ = await iterator.next()
 
-                try consumer2Events.subscribe([topic])
+                // Joins the group here, not at test start.
+                let consumer2Events = try await KafkaConsumerStream(configuration: makeConfig(), logger: .kafkaTest)
 
                 var assigned = 0
                 var signaled = false
-                for await event in consumer2Events {
+                while let event = await consumer2Events.next() {
                     switch event {
                     case .rebalance(let action):
                         switch action {
