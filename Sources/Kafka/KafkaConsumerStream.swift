@@ -20,7 +20,7 @@ import Logging
 ///
 /// ```swift
 /// let stream = try await KafkaConsumerStream(configuration: configuration, logger: logger)
-/// while let event = await stream.next() {
+/// while let event = await stream.nextEvent() {
 ///     switch event { ... }
 /// }
 /// ```
@@ -29,7 +29,7 @@ import Logging
 /// ``KafkaConsumerConfiguration/consumptionStrategy``: the initializer subscribes for
 /// `.group` and assigns for `.partitions`, so there is nothing to subscribe to by hand.
 ///
-/// Calling ``next()`` *is* the poll loop; there is no separate service task to run.
+/// Calling ``nextEvent()`` *is* the poll loop; there is no separate service task to run.
 ///
 /// The element is ``KafkaConsumerEvent``, *not* a message: records arrive batched inside
 /// ``KafkaConsumerEvent/fetch(_:)`` (see ``KafkaFetch/withMessages(_:)``) alongside
@@ -42,7 +42,7 @@ import Logging
 ///   (un)assigning partitions in response to every ``KafkaConsumerEvent/rebalance(_:)``
 ///   event, otherwise the consumer is never assigned any partitions and consumes nothing.
 ///
-/// - Important: ``next()`` must be called from one task at a time — see its own
+/// - Important: ``nextEvent()`` must be called from one task at a time — see its own
 ///   documentation.
 public final class KafkaConsumerStream: @unchecked Sendable {
     /// Internal: used by `KafkaTransaction` to reach the consumer's kafka handle when
@@ -53,7 +53,7 @@ public final class KafkaConsumerStream: @unchecked Sendable {
     private let healthStatusEnabled: Bool
     private let executor: DispatchQueueTaskExecutor
 
-    // Poll state: only ever touched by `next()`, which is single-consumer. This is why the
+    // Poll state: only ever touched by `nextEvent()`, which is single-consumer. This is why the
     // `Sendable` conformance is `@unchecked` — no lock guards these, the contract does.
     private var events = [RDKafkaClient.KafkaEvent]()
     private var idx = 0
@@ -123,7 +123,7 @@ public final class KafkaConsumerStream: @unchecked Sendable {
     ///
     /// - Important: Single-consumer. Calling this concurrently from more than one task
     ///   splits the event stream between the callers and is not supported.
-    public func next() async -> KafkaConsumerEvent? {
+    public func nextEvent() async -> KafkaConsumerEvent? {
         while true {
             // Honor structured-concurrency cancellation: end the sequence so callers
             // iterating in a cancelled task (or a cancelled task group) stop cleanly.

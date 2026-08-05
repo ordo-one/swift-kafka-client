@@ -191,7 +191,7 @@ final class KafkaTests: XCTestCase {
                 // which is freed when the closure returns, so copy the fields out immediately.
                 var consumedMessages = [(topic: String, key: ByteBuffer?, value: ByteBuffer?)]()
 
-                consumeLoop: while let event = await consumerEvents.next() {
+                consumeLoop: while let event = await consumerEvents.nextEvent() {
                     switch event {
                     case let .fetch(fetch):
                         fetch.withMessages { message in
@@ -282,7 +282,7 @@ final class KafkaTests: XCTestCase {
             // reports whatever it holds at that point.
             group.addTask {
                 var assigned = 0
-                while let event = await consumer1Events.next() {
+                while let event = await consumer1Events.nextEvent() {
                     switch event {
                     case .rebalance(let action):
                         // The caller owns partition (un)assignment (cooperative assignor).
@@ -323,7 +323,7 @@ final class KafkaTests: XCTestCase {
 
                 var assigned = 0
                 var signaled = false
-                while let event = await consumer2Events.next() {
+                while let event = await consumer2Events.nextEvent() {
                     switch event {
                     case .rebalance(let action):
                         switch action {
