@@ -12,6 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+import Crdkafka
+
 public struct KafkaTopicList {
     let list: RDKafkaTopicPartitionList
 
@@ -46,11 +48,11 @@ extension TopicPartition: Hashable {}
 extension KafkaTopicList : Sendable {}
 extension KafkaTopicList : Hashable {}
 
-//extension KafkaTopicList : CustomDebugStringConvertible {
-//    public var debugDescription: String {
-//        list.debugDescription
-//    }
-//}
+extension KafkaTopicList: CustomStringConvertible {
+    public var description: String {
+        self.list.description
+    }
+}
 
 extension KafkaTopicList : Sequence {
     public struct TopicPartitionIterator : IteratorProtocol {
@@ -89,20 +91,68 @@ public enum KafkaRebalanceProtocol: Sendable, Hashable {
     }
 }
 
-
 public enum RebalanceAction : Sendable, Hashable {
     case assign(KafkaRebalanceProtocol, KafkaTopicList)
     case revoke(KafkaRebalanceProtocol, KafkaTopicList)
     case error(KafkaRebalanceProtocol, KafkaTopicList, KafkaError)
 }
 
+/// A batch of consumed records, delivered as ``KafkaConsumerEvent/fetch(_:)``.
+///
+/// `KafkaFetch` owns the underlying librdkafka event and frees it in `deinit`. The messages it
+/// yields keep it alive, so a ``KafkaConsumerStream/Message`` may outlive the iteration that
+/// produced it.
+///
+/// - Important: Single-pass. Iterating consumes the event's messages, so a `KafkaFetch` can only be
+///   iterated once — a second pass yields nothing. Iterate from one task at a time.
+public final class KafkaFetch: @unchecked Sendable {
+    @usableFromInline
+    let event: OpaquePointer
+
+    init(_ event: OpaquePointer) {
+        self.event = event
+    }
+
+    deinit {
+        rd_kafka_event_destroy(self.event)
+    }
+}
+
+extension KafkaFetch: Sequence {
+    public struct Iterator: IteratorProtocol {
+        /// Keeps the event alive for the duration of the iteration.
+        @usableFromInline
+        let fetch: KafkaFetch
+
+        init(_ fetch: KafkaFetch) {
+            self.fetch = fetch
+        }
+
+        public mutating func next() -> KafkaConsumerStream.Message? {
+            guard let message = rd_kafka_event_message_next(self.fetch.event) else {
+                return nil
+            }
+            return .init(fetch: self.fetch, messagePointer: message)
+        }
+    }
+
+    public func makeIterator() -> Iterator {
+        Iterator(self)
+    }
+}
+
 /// An enumeration representing events that can be received through the ``KafkaConsumerEvents`` asynchronous sequence.
-public enum KafkaConsumerEvent: Sendable, Hashable {
+public enum KafkaConsumerEvent: Sendable {
+    case fetch(KafkaFetch)
+
     /// Rebalance from librdkafka
     case rebalance(RebalanceAction)
 
     /// Error from librdkafka
     case error(KafkaError)
+
+    /// End of a partition has been reached (see `enable.partition.eof`).
+    case partitionEOF(TopicPartition)
 
     /// Consumer health status.
     case healthStatus(KafkaConsumerHealthStatus)
@@ -112,12 +162,16 @@ public enum KafkaConsumerEvent: Sendable, Hashable {
 
     internal init(_ event: RDKafkaClient.KafkaEvent) {
         switch event {
+        case .fetch:
+            fatalError("Cannot cast \(event) to KafkaConsumerEvent")
         case .statistics(let statistics):
             self = .healthStatus(statistics.consumerHealthStatus)
         case .rebalance(let action):
             self = .rebalance(action)
         case .error(let error):
             self = .error(error)
+        case .partitionEOF(let topicPartition):
+            self = .partitionEOF(topicPartition)
         case .deliveryReport:
             fatalError("Cannot cast \(event) to KafkaConsumerEvent")
         }
