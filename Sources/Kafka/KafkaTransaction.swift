@@ -30,27 +30,11 @@ public final class KafkaTransaction {
 
     public func send(
         offsets: KafkaTopicList,
-        forConsumer consumer: KafkaConsumer,
+        forConsumer consumer: some KafkaHandleProviding,
         timeout: Duration = .kafkaUntilEndOfTransactionTimeout,
         attempts: UInt64 = .max
     ) async throws {
-        let consumerClient = try consumer.client()
-        try await consumerClient.withKafkaHandlePointer {
-            offsetNum += offsets.list.count
-            offsetSend += 1
-            try await self.client.send(attempts: attempts, offsets: offsets.list, forConsumerKafkaHandle: $0, timeout: timeout)
-        }
-    }
-
-    /// Commit the given `offsets` to the transaction on behalf of a
-    /// ``KafkaConsumerStream`` (as opposed to the classic ``KafkaConsumer``).
-    public func send(
-        offsets: KafkaTopicList,
-        forConsumer consumer: KafkaConsumerStream,
-        timeout: Duration = .kafkaUntilEndOfTransactionTimeout,
-        attempts: UInt64 = .max
-    ) async throws {
-        try await consumer.client.withKafkaHandlePointer {
+        try await consumer.withKafkaHandlePointer {
             offsetNum += offsets.list.count
             offsetSend += 1
             try await self.client.send(attempts: attempts, offsets: offsets.list, forConsumerKafkaHandle: $0, timeout: timeout)

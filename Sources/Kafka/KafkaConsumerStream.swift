@@ -59,9 +59,7 @@ import Logging
 ///   so nothing enforces this ordering — in practice, keep the messages in a narrower scope than
 ///   the stream, or clear the collection holding them before the stream goes away.
 public final class KafkaConsumerStream: @unchecked Sendable {
-    /// Internal: used by `KafkaTransaction` to reach the consumer's kafka handle when
-    /// committing consumed offsets transactionally (`send(offsets:forConsumer:)`).
-    let client: RDKafkaClient
+    private let client: RDKafkaClient
     private let configPollInterval: Duration
     private let metrics: KafkaConfiguration.ConsumerMetrics
     private let healthStatusEnabled: Bool
@@ -370,5 +368,11 @@ public final class KafkaConsumerStream: @unchecked Sendable {
     public func incrementalUnassign(_ topics: KafkaTopicList) async throws {
         try ensureNotClosed()
         try await client.incrementalUnassign(topicPartitionList: topics.list)
+    }
+}
+
+extension KafkaConsumerStream: KafkaHandleProviding {
+    public func withKafkaHandlePointer<T>(_ body: (OpaquePointer) async throws -> T) async throws -> T {
+        try await self.client.withKafkaHandlePointer(body)
     }
 }

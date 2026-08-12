@@ -656,6 +656,12 @@ public final class KafkaConsumer: Sendable, Service {
     }
 }
 
+extension KafkaConsumer: KafkaHandleProviding {
+    public func withKafkaHandlePointer<T>(_ body: (OpaquePointer) async throws -> T) async throws -> T {
+        try await self.client().withKafkaHandlePointer(body)
+    }
+}
+
 // MARK: - KafkaConsumer + StateMachine
 
 extension KafkaConsumer {
