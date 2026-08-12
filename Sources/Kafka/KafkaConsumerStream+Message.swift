@@ -16,6 +16,11 @@ import Crdkafka
 import struct NIOCore.ByteBuffer
 import struct Foundation.Date
 import typealias Foundation.TimeInterval
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 extension KafkaConsumerStream {
     /// A single record consumed from Kafka, obtained by iterating a ``KafkaFetch``.
