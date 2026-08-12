@@ -382,14 +382,19 @@ public final class RDKafkaClient: Sendable {
     /// Poll the event `rd_kafka_queue_t` for new events.
     ///
     /// - Parameter maxEvents:Maximum number of events to serve in one invocation.
-    func eventPoll(events: inout [KafkaEvent], maxEvents: Int = 100) -> Bool /* should sleep */ {
+    /// - Parameter timeout: How long the *first* poll may block waiting for an event; the
+    ///   remaining polls of the batch never block. Defaults to not blocking at all, in which
+    ///   case the caller is expected to back off itself.
+    /// - Warning: With a non-zero `timeout` this blocks the calling thread, so it must not be
+    ///   invoked from Swift Concurrency's cooperative thread pool.
+    func eventPoll(events: inout [KafkaEvent], maxEvents: Int = 100, blockingFor timeout: Duration = .zero) -> Bool /* should sleep */ {
         events.removeAll(keepingCapacity: true)
         events.reserveCapacity(maxEvents)
 
         var shouldSleep = true
 
-        for _ in 0..<maxEvents {
-            let event = rd_kafka_queue_poll(self.queue, 0)
+        for index in 0..<maxEvents {
+            let event = rd_kafka_queue_poll(self.queue, index == 0 ? timeout.totalMilliseconds : 0)
 
             let rdEventType = rd_kafka_event_type(event)
             guard let eventType = RDKafkaEvent(rawValue: rdEventType) else {

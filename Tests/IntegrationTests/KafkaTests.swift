@@ -216,6 +216,10 @@ final class KafkaTests: XCTestCase {
                     }
                 }
 
+                // Commits the offsets and leaves the consumer group gracefully. The collected
+                // messages stay readable afterwards — they own their fetch events.
+                try await consumerEvents.close()
+
                 XCTAssertEqual(testMessages.count, consumedMessages.count)
 
                 for (index, consumedMessage) in consumedMessages.enumerated() {
@@ -231,6 +235,167 @@ final class KafkaTests: XCTestCase {
             // Shutdown the serviceGroup
             await serviceGroup.triggerGracefulShutdown()
         }
+    }
+
+    /// `close()` performs the librdkafka close handshake: it answers the final revoke, commits the
+    /// offsets and leaves the group, so a replacement consumer gets the partitions without waiting
+    /// for the session timeout.
+    func testConsumerStreamClose() async throws {
+        let testMessages = Self.createTestMessages(topic: self.uniqueTestTopic, count: 10)
+        let (producer, events) = try KafkaProducer.makeProducerWithEvents(configuration: self.producerConfig, logger: .kafkaTest)
+
+        let groupID = UUID().uuidString
+        func makeConfig() -> KafkaConsumerConfiguration {
+            var config = KafkaConsumerConfiguration(
+                consumptionStrategy: .group(id: groupID, topics: [self.uniqueTestTopic]),
+                bootstrapBrokerAddresses: [self.bootstrapBrokerAddress]
+            )
+            config.autoOffsetReset = .beginning
+            config.broker.addressFamily = .v4
+            config.pollInterval = .milliseconds(10)
+            return config
+        }
+
+        let serviceGroupConfiguration = ServiceGroupConfiguration(services: [producer], logger: .kafkaTest)
+        let serviceGroup = ServiceGroup(configuration: serviceGroupConfiguration)
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await serviceGroup.run()
+            }
+
+            try await Self.sendAndAcknowledgeMessages(
+                producer: producer,
+                events: events,
+                messages: testMessages
+            )
+
+            let stream = try await KafkaConsumerStream(configuration: makeConfig(), logger: .kafkaTest)
+
+            var consumedMessages = [KafkaConsumerStream.Message]()
+            consumeLoop: while let event = await stream.nextEvent() {
+                switch event {
+                case let .fetch(fetch):
+                    consumedMessages.append(contentsOf: fetch)
+                    if consumedMessages.count >= testMessages.count {
+                        break consumeLoop
+                    }
+                case .rebalance(let action):
+                    switch action {
+                    case let .assign(_, topics):
+                        try await stream.assign(topics)
+                    case .revoke, .error:
+                        try await stream.unassignAll()
+                    }
+                case .error(let error):
+                    XCTFail("Unexpected error while consuming: \(error)")
+                    break consumeLoop
+                default:
+                    break
+                }
+            }
+
+            try await stream.close()
+
+            // A closed stream has no more events and refuses further assignment changes.
+            let eventAfterClose = await stream.nextEvent()
+            XCTAssertNil(eventAfterClose)
+            do {
+                try await stream.unassignAll()
+                XCTFail("unassignAll() should throw on a closed stream")
+            } catch {
+                // Expected.
+            }
+
+            // Idempotent.
+            try await stream.close()
+
+            // The messages were collected before `close()` and are still readable: they own their
+            // fetch events, which the close does not touch.
+            XCTAssertEqual(testMessages.count, consumedMessages.count)
+            for (index, consumedMessage) in consumedMessages.enumerated() {
+                XCTAssertEqual(testMessages[index].topic, consumedMessage.topic)
+                XCTAssertEqual(ByteBuffer(string: testMessages[index].key!), consumedMessage.key)
+                XCTAssertEqual(ByteBuffer(string: testMessages[index].value!), consumedMessage.value)
+            }
+            // Release them before `stream` goes out of scope: a fetch event outliving the client
+            // deadlocks `rd_kafka_destroy`, since `KafkaFetch` does not retain the client.
+            consumedMessages.removeAll()
+
+            // Proof that the group was really left: a replacement consumer in the same group is
+            // assigned the partition right away. Had the first consumer just stopped polling, the
+            // coordinator would still count it as a member and the new one would have to wait for
+            // it to be evicted, which takes far longer than the deadline below.
+            let assignedToReplacement = ManagedAtomic<Int>(0)
+            let replacement = try await KafkaConsumerStream(configuration: makeConfig(), logger: .kafkaTest)
+            let replacementTask = Task {
+                while let event = await replacement.nextEvent() {
+                    guard case let .rebalance(action) = event else {
+                        continue
+                    }
+                    switch action {
+                    case let .assign(_, topics):
+                        try await replacement.assign(topics)
+                        let count = topics.reduce(into: 0) { partial, _ in partial += 1 }
+                        assignedToReplacement.wrappingIncrement(by: count, ordering: .relaxed)
+                    case .revoke, .error:
+                        try await replacement.unassignAll()
+                    }
+                }
+                try await replacement.close()
+            }
+
+            let deadline = ContinuousClock().now.advanced(by: .seconds(15))
+            while assignedToReplacement.load(ordering: .relaxed) == 0, ContinuousClock().now < deadline {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            XCTAssertGreaterThan(
+                assignedToReplacement.load(ordering: .relaxed),
+                0,
+                "a replacement consumer should be assigned the partition once the group was left gracefully"
+            )
+            replacementTask.cancel()
+            try await replacementTask.value
+
+            await serviceGroup.triggerGracefulShutdown()
+        }
+    }
+
+    /// `close()` must complete even when the task calling it has already been cancelled — that is
+    /// the usual shape, since cancellation is what ends the `nextEvent()` loop.
+    func testConsumerStreamCloseInCancelledTask() async throws {
+        var consumerConfig = KafkaConsumerConfiguration(
+            consumptionStrategy: .group(id: UUID().uuidString, topics: [self.uniqueTestTopic]),
+            bootstrapBrokerAddresses: [self.bootstrapBrokerAddress]
+        )
+        consumerConfig.autoOffsetReset = .beginning
+        consumerConfig.broker.addressFamily = .v4
+        consumerConfig.pollInterval = .milliseconds(10)
+
+        let stream = try await KafkaConsumerStream(configuration: consumerConfig, logger: .kafkaTest)
+
+        let task = Task {
+            while let event = await stream.nextEvent() {
+                if case let .rebalance(action) = event {
+                    switch action {
+                    case let .assign(_, topics):
+                        try await stream.assign(topics)
+                    case .revoke, .error:
+                        try await stream.unassignAll()
+                    }
+                }
+            }
+            // The loop ended because the task was cancelled; the close handshake still has to run
+            // to completion here.
+            try await stream.close()
+        }
+
+        // Give the consumer a moment to join the group so the close has real work to do.
+        try await Task.sleep(for: .seconds(2))
+        task.cancel()
+
+        // Completes only if `close()` returned rather than being cut short by the cancellation.
+        try await task.value
     }
 
     func testRebalanceWithEventsSequence() async throws {
@@ -266,9 +431,9 @@ final class KafkaTests: XCTestCase {
 
         // Creating the sequence joins the group (the initializer subscribes to the topics in
         // the configuration), so consumer 2 is deliberately *not* created here — its task
-        // creates it only after `ready`, which is what staggers the two joins. Consumer 1 is
-        // retained in this outer scope for the whole test, so its task returning does not
-        // deinit its client and trigger a spurious re-rebalance.
+        // creates it only after `ready`, which is what staggers the two joins. Consumer 1 lives in
+        // this outer scope so that leaving the group is driven by its explicit `close()` rather
+        // than by its task returning and deiniting the client.
         let consumer1Events = try await KafkaConsumerStream(configuration: makeConfig(), logger: .kafkaTest)
 
         // Each task returns `(consumerId, finalPartitionCount)`.
@@ -306,7 +471,10 @@ final class KafkaTests: XCTestCase {
                         break // ignore .partitionEOF (empty topic) and other events
                     }
                 }
-                return (1, assigned) // reached when the group is cancelled
+                // Cancellation ended the loop; leave the group gracefully. Works from a cancelled
+                // task, which is exactly the case here.
+                try await consumer1Events.close()
+                return (1, assigned)
             }
 
             // Consumer 2: starts only after consumer 1 owns all partitions, then joins and
@@ -348,7 +516,8 @@ final class KafkaTests: XCTestCase {
                         break // ignore .partitionEOF (empty topic) and other events
                     }
                 }
-                return (2, assigned) // reached when the group is cancelled
+                try await consumer2Events.close()
+                return (2, assigned)
             }
 
             // Once consumer 2 has its partitions the rebalance has settled; stop both
