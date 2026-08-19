@@ -12,7 +12,7 @@ public final class KafkaTransactionalProducer: Service, Sendable {
         self.producer = producer
         self.logger = logger
         let client = try producer.client()
-        try await client.initTransactions(timeout: config.transactionsTimeout)
+        try await client.initTransactions(timeout: config.initTransactionsTimeout)
     }
 
     /// Initialize a new ``KafkaTransactionalProducer``.

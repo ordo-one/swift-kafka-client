@@ -177,10 +177,34 @@ public struct KafkaTransactionalProducerConfiguration {
 
     // TODO: add Docc
     var transactionalId: String
-    var transactionsTimeout: Duration = .seconds(60) {
+
+    /// Maximum time a transaction may stay open before the transaction coordinator aborts it.
+    /// Also bounds how long ``KafkaTransaction/commit()`` and ``KafkaTransaction/abort()`` block,
+    /// as both wait until the end of the transaction timeout.
+    ///
+    /// The broker rejects values above its own `transaction.max.timeout.ms`.
+    /// (Lowest granularity is milliseconds)
+    /// Default: `.seconds(60)`
+    public var transactionsTimeout: Duration = .seconds(60) {
         didSet {
             precondition(
-                self.maximumMetadataAge.canBeRepresentedAsMilliseconds,
+                self.transactionsTimeout.canBeRepresentedAsMilliseconds,
+                "Lowest granularity is milliseconds"
+            )
+        }
+    }
+
+    /// Maximum time the producer blocks on initialization while it acquires the transaction
+    /// coordinator and a producer ID, and fences any previous producer using the same
+    /// ``transactionalId``. Bounds how long producer creation takes to fail against an
+    /// unreachable coordinator, independently of ``transactionsTimeout``.
+    ///
+    /// (Lowest granularity is milliseconds)
+    /// Default: `.seconds(60)`
+    public var initTransactionsTimeout: Duration = .seconds(60) {
+        didSet {
+            precondition(
+                self.initTransactionsTimeout.canBeRepresentedAsMilliseconds,
                 "Lowest granularity is milliseconds"
             )
         }
