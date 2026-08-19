@@ -21,14 +21,15 @@ extension RDKafkaClient {
     /// Create a topic with a unique name (`UUID`).
     /// Blocks for a maximum of `timeout` milliseconds.
     /// - Parameter partitions: Partitions in topic (default: -1 - default for broker)
+    /// - Parameter replicationFactor: Replicas per partition (default: -1 - default for broker)
     /// - Parameter config: Topic configuration, if empty broker defaults are used. See https://kafka.apache.org/documentation.html#topicconfigs
     /// - Parameter timeout: Timeout in milliseconds.
     /// - Returns: Name of newly created topic.
     /// - Throws: A ``KafkaError`` if the topic creation failed.
-    public func _createUniqueTopic(partitions: Int32 = -1, config: [String: String] = [:], timeout: Int32) throws -> String {
+    public func _createUniqueTopic(partitions: Int32 = -1, replicationFactor: Int32 = -1, config: [String: String] = [:], timeout: Int32) throws -> String {
         let uniqueTopicName = UUID().uuidString
 
-        try _createTopic(topicName: uniqueTopicName, partitions: partitions, config: config, timeout: timeout)
+        try _createTopic(topicName: uniqueTopicName, partitions: partitions, replicationFactor: replicationFactor, config: config, timeout: timeout)
 
         return uniqueTopicName
     }
@@ -36,18 +37,19 @@ extension RDKafkaClient {
     /// Create a topic with specified name
     /// Blocks for a maximum of `timeout` milliseconds.
     /// - Parameter partitions: Partitions in topic (default: -1 - default for broker)
+    /// - Parameter replicationFactor: Replicas per partition (default: -1 - default for broker)
     /// - Parameter config: Topic configuration, if empty broker defaults are used. See https://kafka.apache.org/documentation.html#topicconfigs
     /// - Parameter timeout: Timeout in milliseconds.
     /// - Returns: Name of newly created topic.
     /// - Throws: A ``KafkaError`` if the topic creation failed.
-    public func _createTopic(topicName: String, partitions: Int32 = -1, config: [String: String] = [:], timeout: Int32) throws {
+    public func _createTopic(topicName: String, partitions: Int32 = -1, replicationFactor: Int32 = -1, config: [String: String] = [:], timeout: Int32) throws {
         let errorChars = UnsafeMutablePointer<CChar>.allocate(capacity: RDKafkaClient.stringSize)
         defer { errorChars.deallocate() }
 
         guard let newTopic = rd_kafka_NewTopic_new(
             topicName,
             partitions,
-            -1, // use default replication_factor
+            replicationFactor,
             errorChars,
             RDKafkaClient.stringSize
         ) else {
