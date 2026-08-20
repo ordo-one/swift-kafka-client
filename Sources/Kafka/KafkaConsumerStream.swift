@@ -142,6 +142,11 @@ public final class KafkaConsumerStream: @unchecked Sendable {
                 """
             )
         }
+        // Release order between stored properties is unspecified, and `client`'s deinit runs
+        // `rd_kafka_destroy`, which waits for broker threads that a buffered fetch event still
+        // holds references to. A deinit body runs before the properties are released, so
+        // dropping the batch here is what keeps that ordering from deadlocking.
+        events.removeAll()
     }
 
     /// Poll for the next event, waiting until one is available.
