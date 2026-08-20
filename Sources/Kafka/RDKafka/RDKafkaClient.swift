@@ -371,7 +371,7 @@ public final class RDKafkaClient: Sendable {
 
     /// Swift wrapper for events from `librdkafka`'s event queue.
     enum KafkaEvent {
-        case fetch(OpaquePointer)
+        case fetch(KafkaFetch)
         case deliveryReport(results: [KafkaDeliveryReport])
         case statistics(RDKafkaStatistics)
         case rebalance(RebalanceAction)
@@ -409,7 +409,8 @@ public final class RDKafkaClient: Sendable {
 
             switch eventType {
             case .fetch:
-                events.append(.fetch(event!))
+                // `KafkaFetch` takes ownership, so whoever drops the event frees it.
+                events.append(.fetch(KafkaFetch(event!)))
             case .deliveryReport:
                 let forwardEvent = self.handleDeliveryReportEvent(event)
                 events.append(forwardEvent)
