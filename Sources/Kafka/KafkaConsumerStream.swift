@@ -142,6 +142,11 @@ public final class KafkaConsumerStream: @unchecked Sendable {
                 """
             )
         }
+        // Release order between stored properties is unspecified, and `client`'s deinit runs
+        // `rd_kafka_destroy`, which waits for broker threads that a buffered fetch event still
+        // holds references to. A deinit body runs before the properties are released, so
+        // dropping the batch here is what keeps that ordering from deadlocking.
+        events.removeAll()
     }
 
     /// Poll for the next event, waiting until one is available.
@@ -194,8 +199,8 @@ public final class KafkaConsumerStream: @unchecked Sendable {
             }
 
             switch event {
-            case let .fetch(ptr):
-                return .fetch(.init(ptr))
+            case let .fetch(fetch):
+                return .fetch(fetch)
 
             case let .partitionEOF(topicPartition):
                 return .partitionEOF(topicPartition)
@@ -280,10 +285,10 @@ public final class KafkaConsumerStream: @unchecked Sendable {
     private func handleEventsWhileClosing() async {
         for event in events {
             switch event {
-            case let .fetch(ptr):
-                // Records that were already in flight when the close began; wrapping the event
-                // in a `KafkaFetch` that is immediately released frees it.
-                _ = KafkaFetch(ptr)
+            case .fetch:
+                // Records that were already in flight when the close began; releasing the
+                // batch below frees them.
+                break
 
             case let .rebalance(action):
                 // The stream enables `.rebalance` events, which turns off librdkafka's automatic
@@ -314,15 +319,8 @@ public final class KafkaConsumerStream: @unchecked Sendable {
     /// Release the events that ``nextEvent()`` polled but has not delivered yet.
     ///
     /// `eventPoll` hands `.fetch` events over to ``KafkaFetch``, which destroys them in its
-    /// `deinit`, so undelivered ones have to be wrapped and dropped here or the underlying
-    /// `rd_kafka_event_t` leaks.
+    /// `deinit`, so dropping the buffered events releases the ones never delivered.
     private func discardPendingEvents() {
-        while idx < events.count {
-            if case let .fetch(ptr) = events[idx] {
-                _ = KafkaFetch(ptr)
-            }
-            idx += 1
-        }
         events.removeAll(keepingCapacity: true)
         idx = 0
     }

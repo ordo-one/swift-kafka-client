@@ -45,6 +45,9 @@ final class KafkaTests: XCTestCase {
     var uniqueTestTopic2: String!
     /// Number of partitions in `uniqueTestTopic2` (the shared multi-partition fixture).
     static let uniqueTestTopic2Partitions = 6
+    /// Teardowns attempted by `testConsumerTeardownWithAbandonedStream`. High enough to give the
+    /// race it hunts a wide margin, low enough to keep the test around three minutes.
+    static let teardownIterations = 200
 
     override func setUpWithError() throws {
         self.bootstrapBrokerAddress = KafkaConfiguration.BrokerAddress(
@@ -1362,6 +1365,138 @@ final class KafkaTests: XCTestCase {
             // Wait for second Consumer Task to complete
             let totalCtr = sharedCtr.load(ordering: .relaxed)
             XCTAssertEqual(totalCtr, Int(numOfMessages))
+        }
+    }
+
+    /// A consumer whose message stream is abandoned mid-partition has to keep tearing down.
+    ///
+    /// `rd_kafka_consumer_close_queue` forwards the group queue onto the queue the event loop
+    /// polls, so records the application left queued arrive there as fetch events during the
+    /// close. An event the loop drops without freeing pins the decompressed message-set buffer,
+    /// every record in that batch holds a broker reference through it, and those references gate
+    /// broker-thread exit — so `rd_kafka_destroy` joins a thread that can never finish and the
+    /// teardown never returns.
+    ///
+    /// The records have to arrive compressed for that to bite, and the payload has to actually
+    /// compress: librdkafka throws a compressed message set away and sends it uncompressed when
+    /// compression did not shrink it, which skips the decompress path the broker reference is
+    /// taken on. A payload of random bytes therefore never reproduces this, however many
+    /// iterations it runs.
+    ///
+    /// The teardown is a race, but a lopsided one: without the fix this hangs within the first
+    /// handful of teardowns, and the iteration count is generous only to keep the margin wide.
+    ///
+    /// A wedged teardown is not cancellable, so it is awaited with a deadline from a detached
+    /// task — the test has to fail rather than hang the run, and the abandoned task stays blocked.
+    func testConsumerTeardownWithAbandonedStream() async throws {
+        let partitionCount = Self.uniqueTestTopic2Partitions
+        // Resource-sized records: a fetch has to still be in flight, and a batch has to hold more
+        // than the single record that gets read, when the stream is abandoned.
+        let payload = String(repeating: "x", count: 256 * 1024)
+        let messages = (0..<(partitionCount * 16)).map { index in
+            KafkaProducerMessage(
+                topic: self.uniqueTestTopic2!,
+                partition: KafkaPartition(rawValue: index % partitionCount),
+                key: "key",
+                value: payload
+            )
+        }
+
+        var producerConfig = self.producerConfig!
+        producerConfig.compression = "lz4"
+        let (producer, producerEvents) = try KafkaProducer.makeProducerWithEvents(
+            configuration: producerConfig,
+            logger: .kafkaTest
+        )
+
+        let serviceGroupConfiguration = ServiceGroupConfiguration(services: [producer], logger: .kafkaTest)
+        let serviceGroup = ServiceGroup(configuration: serviceGroupConfiguration)
+
+        let assignment = (0..<partitionCount).map { partition in
+            KafkaConsumerConfiguration.ConsumptionStrategy.TopicPartition(
+                partition: KafkaPartition(rawValue: partition),
+                topic: self.uniqueTestTopic2!,
+                offset: KafkaOffset(rawValue: 0)
+            )
+        }
+        let groupID = UUID().uuidString
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await serviceGroup.run()
+            }
+
+            try await Self.sendAndAcknowledgeMessages(
+                producer: producer,
+                events: producerEvents,
+                messages: messages,
+                skipConsistencyCheck: true
+            )
+
+            for iteration in 1...Self.teardownIterations {
+                var consumerConfig = KafkaConsumerConfiguration(
+                    consumptionStrategy: .partitions(groupID: groupID, partitions: assignment),
+                    bootstrapBrokerAddresses: [self.bootstrapBrokerAddress]
+                )
+                consumerConfig.autoOffsetReset = .beginning
+                consumerConfig.isAutoCommitEnabled = false
+                consumerConfig.broker.addressFamily = .v4
+                consumerConfig.pollInterval = .milliseconds(10)
+
+                let (consumer, consumerEvents) = try KafkaConsumer.makeConsumerWithEvents(
+                    configuration: consumerConfig,
+                    logger: .kafkaTest
+                )
+
+                // Detached, because this is the task the teardown blocks: a structured child would
+                // keep the enclosing group from ever returning.
+                let running = Task.detached {
+                    try await withThrowingTaskGroup(of: Void.self) { consumerGroup in
+                        consumerGroup.addTask {
+                            try await consumer.run()
+                        }
+                        consumerGroup.addTask {
+                            for await _ in consumerEvents {}
+                        }
+                        try await consumerGroup.waitForAll()
+                    }
+                }
+
+                // Abandon the stream on the first record, with the rest of the topic still queued.
+                var read = 0
+                for try await _ in consumer.messages {
+                    read += 1
+                    break
+                }
+                // A teardown with nothing left queued proves nothing, so an iteration that read
+                // no record is a broken test rather than a passing one.
+                XCTAssertEqual(read, 1, "Consumer \(iteration) read no record")
+
+                let stopped = ManagedAtomic(false)
+                Task.detached {
+                    consumer.triggerGracefulShutdown()
+                    _ = try? await running.value
+                    stopped.store(true, ordering: .relaxed)
+                }
+
+                let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+                while !stopped.load(ordering: .relaxed), ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                guard stopped.load(ordering: .relaxed) else {
+                    XCTFail(
+                        """
+                        Consumer \(iteration) of \(Self.teardownIterations) did not tear down \
+                        within 10s: rd_kafka_destroy is waiting on a broker thread that a leaked \
+                        fetch event still holds a reference to.
+                        """
+                    )
+                    await serviceGroup.triggerGracefulShutdown()
+                    return
+                }
+            }
+
+            await serviceGroup.triggerGracefulShutdown()
         }
     }
 

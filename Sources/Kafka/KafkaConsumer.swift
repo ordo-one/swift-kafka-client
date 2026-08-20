@@ -552,6 +552,12 @@ public final class KafkaConsumer: Sendable, Service {
                         break // Ignore
                     }
                 }
+                // A fetch event pins the response buffer, which pins a broker reference that
+                // gates broker-thread exit. The next loop iteration asks the state machine for
+                // an action, and that is where the last client reference can be dropped and
+                // `rd_kafka_destroy` run — so the batch has to be released before then, or the
+                // teardown waits on a broker the batch itself is holding.
+                events.removeAll(keepingCapacity: true)
                 if shouldSleep {
                     pollInterval = min(self.configuration.pollInterval, pollInterval * 2)
                     try await clock.sleep(until: clock.now.advanced(by: pollInterval))
