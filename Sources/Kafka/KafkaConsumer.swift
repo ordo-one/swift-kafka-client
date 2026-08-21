@@ -438,45 +438,55 @@ public final class KafkaConsumer: Sendable, Service {
         try client.subscribe(topicPartitionList: subscription)
     }
 
-    public func assign(_ list: KafkaTopicList?) async throws {
-        let action = self.stateMachine.withLockedValue { $0.seekOrRebalance() }
-        switch action {
-        case .allowed(let client):
-            try await client.assign(topicPartitionList: list?.list)
-        case .denied(let err):
-            throw KafkaError.client(reason: err)
+    /// How long an assignment or seek waits for ``run()`` to apply the configured subscription or
+    /// assignment before giving up. Generous: it only expires when nothing ever calls ``run()``.
+    private static let runLoopWaitLimit: Duration = .seconds(10)
+    /// How often that wait re-checks. Short enough to be invisible next to a broker round trip.
+    private static let runLoopWaitInterval: Duration = .milliseconds(5)
+
+    /// Runs `body` with the client, once ``run()`` has applied the configured subscription or
+    /// assignment.
+    ///
+    /// A consumer exists before its run loop does, and only the run loop can start it. Acting on
+    /// the client before then would race the configured assignment — whichever call reached
+    /// `librdkafka` last would win — so a caller that assigns straight after creating a consumer
+    /// waits here rather than having its assignment silently replaced.
+    private func withRunningClient<T>(
+        _ body: (RDKafkaClient) async throws -> T
+    ) async throws -> T {
+        let deadline = ContinuousClock.now.advanced(by: Self.runLoopWaitLimit)
+        while true {
+            switch self.stateMachine.withLockedValue({ $0.seekOrRebalance() }) {
+            case .allowed(let client):
+                return try await body(client)
+            case .denied(let err):
+                throw KafkaError.client(reason: err)
+            case .waitForRunLoop:
+                guard ContinuousClock.now < deadline else {
+                    throw KafkaError.client(
+                        reason: "Consumer run loop did not start; run() must be called before assigning or seeking"
+                    )
+                }
+                try await Task.sleep(for: Self.runLoopWaitInterval)
+            }
         }
+    }
+
+    public func assign(_ list: KafkaTopicList?) async throws {
+        try await self.withRunningClient { try await $0.assign(topicPartitionList: list?.list) }
     }
 
     public func incrementalAssign(_ list: KafkaTopicList) async throws {
-        let action = self.stateMachine.withLockedValue { $0.seekOrRebalance() }
-        switch action {
-        case .allowed(let client):
-            try await client.incrementalAssign(topicPartitionList: list.list)
-        case .denied(let err):
-            throw KafkaError.client(reason: err)
-        }
+        try await self.withRunningClient { try await $0.incrementalAssign(topicPartitionList: list.list) }
     }
 
     public func incrementalUnassign(_ list: KafkaTopicList) async throws {
-        let action = self.stateMachine.withLockedValue { $0.seekOrRebalance() }
-        switch action {
-        case .allowed(let client):
-            try await client.incrementalUnassign(topicPartitionList: list.list)
-        case .denied(let err):
-            throw KafkaError.client(reason: err)
-        }
+        try await self.withRunningClient { try await $0.incrementalUnassign(topicPartitionList: list.list) }
     }
 
     // TODO: add docc: timeout = 0 -> async (no errors reported)
     public func seek(_ list: KafkaTopicList, timeout: Duration) async throws {
-        let action = self.stateMachine.withLockedValue { $0.seekOrRebalance() }
-        switch action {
-        case .allowed(let client):
-            try await client.seek(topicPartitionList: list.list, timeout: timeout)
-        case .denied(let err):
-            throw KafkaError.client(reason: err)
-        }
+        try await self.withRunningClient { try await $0.seek(topicPartitionList: list.list, timeout: timeout) }
     }
 
     /// Resolve per-partition start offsets for a timestamp.
@@ -513,6 +523,8 @@ public final class KafkaConsumer: Sendable, Service {
         case .group(groupID: _, topics: let topics):
             try self.subscribe(topics: topics)
         }
+        // Releases anything waiting to assign or seek: doing so earlier would race this setup.
+        self.stateMachine.withLockedValue { $0.configuredAssignmentApplied() }
         try await self.eventRunLoop()
     }
 
@@ -705,6 +717,10 @@ extension KafkaConsumer {
 
         /// The current state of the StateMachine.
         var state: State = .uninitialized
+
+        /// Whether the run loop has applied the configured subscription or assignment. Gates
+        /// caller-driven assignments, which would otherwise race that one.
+        private var hasAppliedConfiguredAssignment = false
 
         /// Delayed initialization of `StateMachine` as the `source` and the `pollClosure` are
         /// not yet available when the normal initialization occurs.
@@ -902,6 +918,9 @@ extension KafkaConsumer {
             )
             /// Throw an error. The ``KafkaConsumer`` is closed.
             case denied(error: String)
+            /// The run loop has not applied the configured subscription or assignment yet; wait
+            /// for it and ask again.
+            case waitForRunLoop
         }
 
 
@@ -910,14 +929,21 @@ extension KafkaConsumer {
             case .uninitialized:
                 fatalError("\(#function) should not be invoked in state \(self.state)")
             case .initializing:
-                fatalError("\(#function) should not be invoked in state \(self.state)")
+                return .waitForRunLoop
             case .running(let client, _):
-                return .allowed(client: client)
+                // `.running` is entered at the start of that setup, not at its end.
+                return self.hasAppliedConfiguredAssignment ? .allowed(client: client) : .waitForRunLoop
             case .finishing(let client, _):
                 return .allowed(client: client)
             case .finished:
                 return .denied(error: "Consumer finished")
             }
+        }
+
+        /// The run loop has applied the configured subscription or assignment, so callers may now
+        /// assign or seek without racing it.
+        mutating func configuredAssignmentApplied() {
+            self.hasAppliedConfiguredAssignment = true
         }
 
         /// The ``KafkaConsumerMessages`` asynchronous sequence was terminated.
