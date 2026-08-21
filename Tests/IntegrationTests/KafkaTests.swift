@@ -1500,6 +1500,88 @@ final class KafkaTests: XCTestCase {
         }
     }
 
+    /// The configured assignment points at the end of the partition and the caller's at its start,
+    /// so the record that arrives also says whose assignment survived: waiting is only correct if
+    /// the caller's assignment is applied after the configured one, never before it.
+    func testAssignBeforeRunLoopStarts() async throws {
+        let topic = self.uniqueTestTopic!
+        let messages = Self.createTestMessages(topic: topic, count: 10)
+
+        let (producer, producerEvents) = try KafkaProducer.makeProducerWithEvents(
+            configuration: self.producerConfig,
+            logger: .kafkaTest
+        )
+        let serviceGroupConfiguration = ServiceGroupConfiguration(services: [producer], logger: .kafkaTest)
+        let serviceGroup = ServiceGroup(configuration: serviceGroupConfiguration)
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await serviceGroup.run()
+            }
+
+            try await Self.sendAndAcknowledgeMessages(
+                producer: producer,
+                events: producerEvents,
+                messages: messages
+            )
+
+            var consumerConfig = KafkaConsumerConfiguration(
+                consumptionStrategy: .partitions(
+                    groupID: UUID().uuidString,
+                    partitions: [
+                        .init(partition: KafkaPartition(rawValue: 0), topic: topic, offset: .end)
+                    ]
+                ),
+                bootstrapBrokerAddresses: [self.bootstrapBrokerAddress]
+            )
+            consumerConfig.isAutoCommitEnabled = false
+            consumerConfig.broker.addressFamily = .v4
+            consumerConfig.pollInterval = .milliseconds(10)
+
+            let (consumer, consumerEvents) = try KafkaConsumer.makeConsumerWithEvents(
+                configuration: consumerConfig,
+                logger: .kafkaTest
+            )
+
+            let fromStart = KafkaTopicList()
+            fromStart.append(topic: .init(topic, KafkaPartition(rawValue: 0), .beginning))
+            let assigning = Task {
+                try await consumer.assign(fromStart)
+            }
+            // Long enough that the assignment is certainly waiting before anything starts the run
+            // loop, which is what puts the test in the window this covers.
+            try await Task.sleep(for: .milliseconds(200))
+
+            let running = Task {
+                try await withThrowingTaskGroup(of: Void.self) { consumerGroup in
+                    consumerGroup.addTask {
+                        try await consumer.run()
+                    }
+                    consumerGroup.addTask {
+                        for await _ in consumerEvents {}
+                    }
+                    try await consumerGroup.waitForAll()
+                }
+            }
+
+            try await assigning.value
+
+            // Only the offset is kept: a retained message pins the response buffer, which pins a
+            // broker reference, and `rd_kafka_destroy` waits for the broker thread to exit.
+            var receivedOffset: KafkaOffset?
+            for try await message in consumer.messages {
+                receivedOffset = message.offset
+                break
+            }
+            // Offset 0 is the caller's assignment; the configured one pointed at the end.
+            XCTAssertEqual(receivedOffset, KafkaOffset(rawValue: 0))
+
+            consumer.triggerGracefulShutdown()
+            _ = try? await running.value
+            await serviceGroup.triggerGracefulShutdown()
+        }
+    }
+
     // MARK: - Helpers
 
     func createUniqueTopic(partitions: Int32 = -1 /* default num for cluster */) throws -> String {
