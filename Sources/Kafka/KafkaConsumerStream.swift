@@ -367,6 +367,20 @@ public final class KafkaConsumerStream: @unchecked Sendable {
         try ensureNotClosed()
         try await client.incrementalUnassign(topicPartitionList: topics.list)
     }
+
+    /// Move the fetch position of the given partitions, which must be currently assigned.
+    ///
+    /// Each entry's offset is the next offset to fetch. Waits for the seek to be applied unless
+    /// `timeout` is `.zero`, in which case it is only queued.
+    ///
+    /// - Note: Seeking from a `.revoke`/`.assign` handler, before acking the rebalance, is
+    ///   well-defined: pause, seek and resume are ops on the same per-partition queue and are
+    ///   applied in the order they were enqueued, so a seek issued here overrides the resume
+    ///   position librdkafka recorded when it paused the assignment for the rebalance.
+    public func seek(_ topics: KafkaTopicList, timeout: Duration = .seconds(10)) async throws {
+        try ensureNotClosed()
+        try await client.seek(topicPartitionList: topics.list, timeout: timeout)
+    }
 }
 
 extension KafkaConsumerStream: KafkaHandleProviding {
