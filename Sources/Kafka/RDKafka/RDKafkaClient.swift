@@ -42,7 +42,7 @@ public final class RDKafkaClient: Sendable {
     private let rebalanceCallBackStorage: RebalanceCallbackStorage?
 
     /// Queue for blocking calls outside of cooperative thread pool
-    private var gcdQueue: DispatchQueue {
+    var gcdQueue: DispatchQueue {
         // global concurrent queue
         .global(qos: .default) // FIXME: maybe DispatchQueue(label: "com.swift.kafka.queue")
     }
