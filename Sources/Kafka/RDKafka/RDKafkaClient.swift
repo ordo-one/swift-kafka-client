@@ -411,6 +411,7 @@ public final class RDKafkaClient: Sendable {
             case .fetch:
                 // `KafkaFetch` takes ownership, so whoever drops the event frees it.
                 events.append(.fetch(KafkaFetch(event!)))
+                shouldSleep = false
             case .deliveryReport:
                 let forwardEvent = self.handleDeliveryReportEvent(event)
                 events.append(forwardEvent)
