@@ -755,15 +755,15 @@ final class KafkaTests: XCTestCase {
             }
         }
 
-        var assignedIterator = assigned.makeAsyncIterator()
-        await assignedIterator.next()
-        try await consumer.withKafkaHandlePointer { handle in
-            _ = rd_kafka_test_fatal_error(handle, RD_KAFKA_RESP_ERR_FENCED_INSTANCE_ID, "test")
-        }
-        consumer.triggerGracefulShutdown()
-
         let shutDown = await withTaskGroup(of: Bool.self) { group in
             group.addTask {
+                var assignedIterator = assigned.makeAsyncIterator()
+                await assignedIterator.next()
+                try? await consumer.withKafkaHandlePointer { handle in
+                    _ = rd_kafka_test_fatal_error(handle, RD_KAFKA_RESP_ERR_FENCED_INSTANCE_ID, "test")
+                }
+                consumer.triggerGracefulShutdown()
+
                 _ = await runTask.result
                 _ = await eventsTask.result
                 _ = await messagesTask.result
