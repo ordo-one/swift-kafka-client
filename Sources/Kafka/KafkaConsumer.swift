@@ -666,6 +666,7 @@ public final class KafkaConsumer: Sendable, Service {
             } else {
                 logger.error("Caught unknown error: \(error)")
             }
+            self.stateMachine.withLockedValue { $0.closeFailed() }
         }
     }
 
@@ -906,6 +907,14 @@ extension KafkaConsumer {
                 return .triggerGracefulShutdown(client: client)
             case .finished:
                 return nil
+            }
+        }
+
+        /// A close that failed to start never completes (librdkafka refuses to close after a fatal
+        /// error), so waiting in `.finishing` for it would poll forever.
+        mutating func closeFailed() {
+            if case .finishing = self.state {
+                self.state = .finished
             }
         }
 
