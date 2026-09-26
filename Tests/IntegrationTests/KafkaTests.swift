@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 import Atomics
+import Crdkafka
 import struct Foundation.UUID
 @testable import Kafka
 @_spi(Internal) import Kafka
@@ -714,6 +715,73 @@ final class KafkaTests: XCTestCase {
         }
     }
     #endif
+
+    /// librdkafka refuses to close a consumer that raised a fatal error, such as a fenced static
+    /// member, so a graceful shutdown must not wait for a close that never starts.
+    func testGracefulShutdownAfterFatalError() async throws {
+        let groupID = UUID().uuidString
+        var consumerConfig = KafkaConsumerConfiguration(
+            consumptionStrategy: .group(id: groupID, topics: [self.uniqueTestTopic]),
+            bootstrapBrokerAddresses: [self.bootstrapBrokerAddress]
+        )
+        consumerConfig.broker.addressFamily = .v4
+        consumerConfig.groupInstanceId = groupID + "_instance"
+        consumerConfig.listenForRebalance = true
+
+        let (consumer, events) = try KafkaConsumer.makeConsumerWithEvents(
+            configuration: consumerConfig,
+            logger: .kafkaTest
+        )
+        let (assigned, assignedContinuation) = AsyncStream<Void>.makeStream()
+        let runTask = Task { try await consumer.run() }
+        // Rebalance callbacks are served only while messages are polled.
+        let messagesTask = Task { for try await _ in consumer.messages {} }
+        let eventsTask = Task {
+            // With rebalance events enabled, librdkafka waits for the application to answer each one.
+            for try await event in events {
+                guard case .rebalance(let action) = event else { continue }
+                switch action {
+                case .assign(.cooperative, let list):
+                    try await consumer.incrementalAssign(list)
+                    assignedContinuation.yield()
+                case .assign(_, let list):
+                    try await consumer.assign(list)
+                    assignedContinuation.yield()
+                case .revoke(.cooperative, let list), .error(.cooperative, let list, _):
+                    try await consumer.incrementalUnassign(list)
+                case .revoke, .error:
+                    try await consumer.assign(nil)
+                }
+            }
+        }
+
+        let shutDown = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                var assignedIterator = assigned.makeAsyncIterator()
+                await assignedIterator.next()
+                try? await consumer.withKafkaHandlePointer { handle in
+                    _ = rd_kafka_test_fatal_error(handle, RD_KAFKA_RESP_ERR_FENCED_INSTANCE_ID, "test")
+                }
+                consumer.triggerGracefulShutdown()
+
+                _ = await runTask.result
+                _ = await eventsTask.result
+                _ = await messagesTask.result
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(10))
+                return false
+            }
+            let first = await group.next()!
+            runTask.cancel()
+            eventsTask.cancel()
+            messagesTask.cancel()
+            group.cancelAll()
+            return first
+        }
+        XCTAssertTrue(shutDown, "Consumer did not shut down after a fatal error")
+    }
 
     func testProduceAndConsumeWithScheduleCommit() async throws {
         let testMessages = Self.createTestMessages(topic: self.uniqueTestTopic, count: 10)
