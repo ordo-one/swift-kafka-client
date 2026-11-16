@@ -137,6 +137,21 @@ final class KafkaConsumerTests: XCTestCase {
         _ = try KafkaConsumer.makeConsumerWithEvents(configuration: config, logger: .kafkaTest)
     }
 
+    func testMetadataTimesOutWithoutBroker() async throws {
+        let config = KafkaConsumerConfiguration(
+            consumptionStrategy: .group(id: UUID().uuidString, topics: ["this-topic-does-not-exist"]),
+            bootstrapBrokerAddresses: []
+        )
+        let consumer = try KafkaConsumer(configuration: config, logger: .kafkaTest)
+
+        do {
+            _ = try await consumer.metadata(timeout: .milliseconds(100))
+            XCTFail("Metadata was returned without a broker")
+        } catch is KafkaError {
+            // Expected: the request gives up instead of waiting for a broker.
+        }
+    }
+
     func testConsumerMessagesReadCancelledBeforeRun() async throws {
         let uniqueGroupID = UUID().uuidString
         let config = KafkaConsumerConfiguration(
