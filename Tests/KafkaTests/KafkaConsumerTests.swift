@@ -147,8 +147,9 @@ final class KafkaConsumerTests: XCTestCase {
         do {
             _ = try await consumer.metadata(timeout: .milliseconds(100))
             XCTFail("Metadata was returned without a broker")
-        } catch is KafkaError {
-            // Expected: the request gives up instead of waiting for a broker.
+        } catch let error as KafkaError {
+            // librdkafka reports a broker that never became usable as a transport failure, not as a timeout.
+            XCTAssertEqual(error.rdKafkaCode, .transport)
         }
     }
 
