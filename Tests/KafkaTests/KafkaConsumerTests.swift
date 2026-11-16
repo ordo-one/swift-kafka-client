@@ -137,6 +137,22 @@ final class KafkaConsumerTests: XCTestCase {
         _ = try KafkaConsumer.makeConsumerWithEvents(configuration: config, logger: .kafkaTest)
     }
 
+    func testMetadataTimesOutWithoutBroker() async throws {
+        let config = KafkaConsumerConfiguration(
+            consumptionStrategy: .group(id: UUID().uuidString, topics: ["this-topic-does-not-exist"]),
+            bootstrapBrokerAddresses: []
+        )
+        let consumer = try KafkaConsumer(configuration: config, logger: .kafkaTest)
+
+        do {
+            _ = try await consumer.metadata(timeout: .milliseconds(100))
+            XCTFail("Metadata was returned without a broker")
+        } catch let error as KafkaError {
+            // librdkafka reports a broker that never became usable as a transport failure, not as a timeout.
+            XCTAssertEqual(error.rdKafkaCode, .transport)
+        }
+    }
+
     func testConsumerMessagesReadCancelledBeforeRun() async throws {
         let uniqueGroupID = UUID().uuidString
         let config = KafkaConsumerConfiguration(

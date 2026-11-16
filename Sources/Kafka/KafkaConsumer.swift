@@ -501,8 +501,10 @@ public final class KafkaConsumer: Sendable, Service {
         return KafkaTopicList(from: resolved)
     }
 
-    public func metadata() async throws -> KafkaMetadata {
-        try await client().metadata()
+    /// - Parameter timeout: How long to wait for a broker to answer, also while none can be reached; the wait cannot
+    ///   be cancelled.
+    public func metadata(timeout: Duration = .milliseconds(5000)) async throws -> KafkaMetadata {
+        try await client().metadata(timeout: timeout)
     }
 
     /// Start the ``KafkaConsumer``.
