@@ -173,6 +173,10 @@ public final class RDKafkaClient: Sendable {
             0...Int(Int32.max) ~= message.partition.rawValue || message.partition == .unassigned,
             "Partition ID outside of valid range \(0...Int32.max)"
         )
+        precondition(
+            message.timestamp.map { .zero <= $0 && $0 < .milliseconds(Int64.max) } ?? true,
+            "Timestamp outside of valid range: before the Unix epoch, or Int64.max milliseconds or later"
+        )
 
         // Pass message over to librdkafka where it will be queued and sent to the Kafka Cluster.
         // Returns 0 on success, error code otherwise.
