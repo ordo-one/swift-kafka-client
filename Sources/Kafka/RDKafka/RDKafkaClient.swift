@@ -208,6 +208,7 @@ public final class RDKafkaClient: Sendable {
                             cHeaders: cHeaders
                         )
                     }
+                    defer { rd_kafka_error_destroy(errorPointer) }
                     return rd_kafka_error_code(errorPointer)
                 }
             }
@@ -224,7 +225,7 @@ public final class RDKafkaClient: Sendable {
     /// This function should only be called from within a scoped pointer accessor
     /// to ensure the referenced memory is valid for the function's lifetime.
     ///
-    /// - Returns: `nil` on success. An opaque pointer `*rd_kafka_resp_err_t` on error.
+    /// - Returns: `nil` on success. On error, an `rd_kafka_error_t` that the caller must free with `rd_kafka_error_destroy`.
     private func _produceVariadic(
         topicHandle: OpaquePointer,
         partition: Int32,
