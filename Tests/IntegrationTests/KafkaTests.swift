@@ -972,6 +972,79 @@ final class KafkaTests: XCTestCase {
         }
     }
 
+    func testProduceAndConsumeWithMessageTimestamp() async throws {
+        var testMessages = Self.createTestMessages(topic: self.uniqueTestTopic, count: 10)
+        // An hour in the past, so a timestamp the producer clock would have given cannot match.
+        let baseTimestamp = Int64(Date().timeIntervalSince1970 * 1000) - 3_600_000
+        for index in testMessages.indices {
+            // Just under the next millisecond, so the test also checks that the time is rounded down.
+            testMessages[index].timestamp = .milliseconds(baseTimestamp + Int64(index)) + .nanoseconds(999_999)
+            // Odd messages also carry a header: a timestamp must take the variadic produce path with and without one.
+            if index % 2 == 1 {
+                testMessages[index].headers = [KafkaHeader(key: "some.header", value: ByteBuffer(string: "value"))]
+            }
+        }
+
+        let (producer, events) = try KafkaProducer.makeProducerWithEvents(configuration: self.producerConfig, logger: .kafkaTest)
+
+        var consumerConfig = KafkaConsumerConfiguration(
+            consumptionStrategy: .group(id: "timestamp-test-group-id", topics: [self.uniqueTestTopic]),
+            bootstrapBrokerAddresses: [self.bootstrapBrokerAddress]
+        )
+        consumerConfig.autoOffsetReset = .beginning // Always read topics from beginning
+        consumerConfig.broker.addressFamily = .v4
+
+        let consumer = try KafkaConsumer(
+            configuration: consumerConfig,
+            logger: .kafkaTest
+        )
+
+        let serviceGroupConfiguration = ServiceGroupConfiguration(services: [producer, consumer], logger: .kafkaTest)
+        let serviceGroup = ServiceGroup(configuration: serviceGroupConfiguration)
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            // Run Task
+            group.addTask {
+                try await serviceGroup.run()
+            }
+
+            // Producer Task
+            group.addTask { [testMessages] in
+                try await Self.sendAndAcknowledgeMessages(
+                    producer: producer,
+                    events: events,
+                    messages: testMessages
+                )
+            }
+
+            // Consumer Task
+            group.addTask { [testMessages] in
+                var consumedMessages = [KafkaConsumerMessage]()
+                for try await message in consumer.messages {
+                    consumedMessages.append(message)
+
+                    if consumedMessages.count >= testMessages.count {
+                        break
+                    }
+                }
+
+                XCTAssertEqual(testMessages.count, consumedMessages.count)
+
+                for (index, (testMessage, consumedMessage)) in zip(testMessages, consumedMessages).enumerated() {
+                    let expected = Date(timeIntervalSince1970: TimeInterval(baseTimestamp + Int64(index)) / 1000.0)
+                    XCTAssertEqual(consumedMessage.timestamp, .createTime(expected))
+                    XCTAssertEqual(testMessage.headers, consumedMessage.headers)
+                }
+            }
+
+            // Wait for Producer Task and Consumer Task to complete
+            try await group.next()
+            try await group.next()
+            // Shutdown the serviceGroup
+            await serviceGroup.triggerGracefulShutdown()
+        }
+    }
+
     func testNoNewConsumerMessagesAfterGracefulShutdown() async throws {
         let testMessages = Self.createTestMessages(topic: self.uniqueTestTopic, count: 2)
         let (producer, events) = try KafkaProducer.makeProducerWithEvents(configuration: self.producerConfig, logger: .kafkaTest)

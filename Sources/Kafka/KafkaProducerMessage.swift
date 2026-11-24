@@ -36,6 +36,13 @@ public struct KafkaProducerMessage<Key: KafkaContiguousBytes, Value: KafkaContig
     /// The value of the message to be sent.
     public var value: Value?
 
+    /// The message's create time, as the time since the Unix epoch.
+    /// Kafka stores whole milliseconds, so the time is rounded down to a millisecond.
+    /// If `nil` or under one millisecond, librdkafka uses the time the message is produced.
+    /// A time before the epoch, or of `Int64.max` milliseconds or later, fails a precondition when the message is sent.
+    /// A topic with `message.timestamp.type` set to `LogAppendTime` replaces it with the broker's time.
+    public var timestamp: Duration?
+
     /// Create a new `KafkaProducerMessage` with a ``KafkaContiguousBytes`` key and value.
     ///
     /// - Parameters:
