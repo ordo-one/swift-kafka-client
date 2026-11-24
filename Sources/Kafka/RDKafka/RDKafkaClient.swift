@@ -181,8 +181,8 @@ public final class RDKafkaClient: Sendable {
             topicConfiguration: topicConfiguration
         ) { topicHandle in
             return try Self.withMessageKeyAndValueBuffer(for: message) { keyBuffer, valueBuffer in
-                if message.headers.isEmpty {
-                    // No message headers set, normal produce method can be used.
+                if message.headers.isEmpty, message.timestamp == nil {
+                    // No message headers or timestamp set, normal produce method can be used.
                     rd_kafka_produce(
                         topicHandle,
                         Int32(message.partition.rawValue),
@@ -196,13 +196,14 @@ public final class RDKafkaClient: Sendable {
                     return rd_kafka_last_error()
                 } else {
                     let errorPointer = try Self.withKafkaCHeaders(for: message.headers) { cHeaders in
-                        // Setting message headers only works with `rd_kafka_produceva` (variadic arguments).
+                        // Setting message headers or a timestamp only works with `rd_kafka_produceva` (variadic arguments).
                         try self._produceVariadic(
                             topicHandle: topicHandle,
                             partition: Int32(message.partition.rawValue),
                             messageFlags: RD_KAFKA_MSG_F_COPY,
                             key: keyBuffer,
                             value: valueBuffer,
+                            timestamp: message.timestamp?.wholeMilliseconds,
                             opaque: UnsafeMutableRawPointer(bitPattern: newMessageID),
                             cHeaders: cHeaders
                         )
@@ -218,7 +219,7 @@ public final class RDKafkaClient: Sendable {
     }
 
     /// Wrapper for `rd_kafka_produceva`.
-    /// (Message production with variadic options, required for sending message headers).
+    /// (Message production with variadic options, required for sending message headers or a timestamp).
     ///
     /// This function should only be called from within a scoped pointer accessor
     /// to ensure the referenced memory is valid for the function's lifetime.
@@ -230,10 +231,11 @@ public final class RDKafkaClient: Sendable {
         messageFlags: Int32,
         key: UnsafeRawBufferPointer?,
         value: UnsafeRawBufferPointer?,
+        timestamp: Int64?,
         opaque: UnsafeMutableRawPointer?,
         cHeaders: [(key: UnsafePointer<CChar>, value: UnsafeRawBufferPointer?)]
     ) throws -> OpaquePointer? {
-        let sizeWithoutHeaders = 4 + (key != nil ? 1 : 0) + (value != nil ? 1 : 0)
+        let sizeWithoutHeaders = 4 + (key != nil ? 1 : 0) + (value != nil ? 1 : 0) + (timestamp != nil ? 1 : 0)
         let size = sizeWithoutHeaders + cHeaders.count
         var arguments = Array(repeating: rd_kafka_vu_t(), count: size)
         var index = 0
@@ -261,6 +263,12 @@ public final class RDKafkaClient: Sendable {
             arguments[index].vtype = RD_KAFKA_VTYPE_VALUE
             arguments[index].u.mem.ptr = UnsafeMutableRawPointer(mutating: value.baseAddress)
             arguments[index].u.mem.size = value.count
+            index += 1
+        }
+
+        if let timestamp {
+            arguments[index].vtype = RD_KAFKA_VTYPE_TIMESTAMP
+            arguments[index].u.i64 = timestamp
             index += 1
         }
 

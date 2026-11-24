@@ -19,6 +19,12 @@ extension Duration {
         return UInt(seconds + attoseconds)
     }
 
+    /// Whole milliseconds, rounded toward zero.
+    /// Integer arithmetic, because at the size of a time since the epoch a `Double` sum can round up to the next millisecond.
+    internal var wholeMilliseconds: Int64 {
+        components.seconds * 1000 + components.attoseconds / 1_000_000_000_000_000
+    }
+
     internal var canBeRepresentedAsMilliseconds: Bool {
         return self.inMilliseconds > 0
     }
