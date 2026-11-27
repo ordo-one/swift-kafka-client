@@ -73,7 +73,7 @@ public final class KafkaConsumerStream: @unchecked Sendable {
     private var idx = 0
     /// Current backoff, adapted on every poll; never exceeds `configPollInterval`.
     private var pollInterval: Duration
-    /// Set by ``close()``: makes ``nextEvent()`` return `nil` and the (un)assign methods throw.
+    /// Set by ``close()``: makes ``nextEvent()`` return `nil` and the partition-control methods throw.
     private var isClosed = false
 
     public init(configuration: KafkaConsumerConfiguration, logger: Logger) async throws {
@@ -232,7 +232,8 @@ public final class KafkaConsumerStream: @unchecked Sendable {
     /// call from a task that has already been cancelled — the close handshake itself is not
     /// cancellable.
     ///
-    /// Afterwards ``nextEvent()`` returns `nil` and the (un)assign methods throw. The
+    /// Afterwards ``nextEvent()`` returns `nil` and the (un)assign, seek, pause and resume methods
+    /// throw. The
     /// `librdkafka` handle and its event queue are released once the `KafkaConsumerStream`
     /// itself is deinitialized.
     ///
@@ -380,6 +381,32 @@ public final class KafkaConsumerStream: @unchecked Sendable {
     public func seek(_ topics: KafkaTopicList, timeout: Duration = .seconds(10)) async throws {
         try ensureNotClosed()
         try await client.seek(topicPartitionList: topics.list, timeout: timeout)
+    }
+
+    // MARK: - Flow control
+
+    /// Pause fetching from the given partitions without changing the assignment.
+    ///
+    /// Records that were already fetched may still be delivered by ``nextEvent()``. This is an
+    /// application pause: librdkafka's own pause/resume around a rebalance does not undo it, and
+    /// it is dropped when the partition is unassigned. The offsets in `topics` are ignored.
+    ///
+    /// - Throws: A ``KafkaError`` if any partition could not be paused (for example because it is
+    ///   not known to the client); the other partitions in the list are still paused.
+    public func pause(_ topics: KafkaTopicList) async throws {
+        try ensureNotClosed()
+        try await client.pausePartitions(topicPartitionList: topics.list)
+    }
+
+    /// Resume fetching from partitions previously paused with ``pause(_:)``.
+    ///
+    /// Fetching continues from the current position. The offsets in `topics` are ignored.
+    ///
+    /// - Throws: A ``KafkaError`` if any partition could not be resumed; the other partitions in
+    ///   the list are still resumed.
+    public func resume(_ topics: KafkaTopicList) async throws {
+        try ensureNotClosed()
+        try await client.resumePartitions(topicPartitionList: topics.list)
     }
 }
 
