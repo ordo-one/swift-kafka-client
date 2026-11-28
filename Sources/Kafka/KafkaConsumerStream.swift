@@ -395,7 +395,7 @@ public final class KafkaConsumerStream: @unchecked Sendable {
     ///   not known to the client); the other partitions in the list are still paused.
     public func pause(_ topics: KafkaTopicList) async throws {
         try ensureNotClosed()
-        try await client.pausePartitions(topicPartitionList: topics.list)
+        try await client.pausePartitions(topics.list)
     }
 
     /// Resume fetching from partitions previously paused with ``pause(_:)``.
@@ -406,7 +406,7 @@ public final class KafkaConsumerStream: @unchecked Sendable {
     ///   the list are still resumed.
     public func resume(_ topics: KafkaTopicList) async throws {
         try ensureNotClosed()
-        try await client.resumePartitions(topicPartitionList: topics.list)
+        try await client.resumePartitions(topics.list)
     }
 }
 

@@ -683,17 +683,17 @@ public final class RDKafkaClient: Sendable {
     /// `rd_kafka_pause_partitions` blocks until the pause has been applied to every partition and
     /// reports failures per partition, so both the return value and the list are checked.
     /// - Parameter topicPartitionList: Pointer to a list of topics + partition pairs.
-    func pausePartitions(topicPartitionList: RDKafkaTopicPartitionList) async throws {
-        try await self.pauseOrResume(topicPartitionList) { rd_kafka_pause_partitions(self.kafkaHandle, $0) }
+    func pausePartitions(_ topicPartitionList: RDKafkaTopicPartitionList) async throws {
+        try await self.performBlockingCallFor(topicPartitionList) { rd_kafka_pause_partitions(self.kafkaHandle, $0) }
     }
 
-    /// Resume consumption for partitions previously paused with ``pausePartitions(topicPartitionList:)``.
+    /// Resume consumption for partitions previously paused with ``pausePartitions(_:)``.
     /// - Parameter topicPartitionList: Pointer to a list of topics + partition pairs.
-    func resumePartitions(topicPartitionList: RDKafkaTopicPartitionList) async throws {
-        try await self.pauseOrResume(topicPartitionList) { rd_kafka_resume_partitions(self.kafkaHandle, $0) }
+    func resumePartitions(_ topicPartitionList: RDKafkaTopicPartitionList) async throws {
+        try await self.performBlockingCallFor(topicPartitionList) { rd_kafka_resume_partitions(self.kafkaHandle, $0) }
     }
 
-    private func pauseOrResume(
+    private func performBlockingCallFor(
         _ topicPartitionList: RDKafkaTopicPartitionList,
         _ call: @escaping (UnsafeMutablePointer<rd_kafka_topic_partition_list_t>) -> rd_kafka_resp_err_t
     ) async throws {
