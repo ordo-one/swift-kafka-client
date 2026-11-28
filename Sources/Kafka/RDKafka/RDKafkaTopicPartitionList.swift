@@ -98,6 +98,19 @@ public final class RDKafkaTopicPartitionList {
             Int(list.pointee.cnt)
         }
     }
+
+    /// The first per-partition error librdkafka wrote back into the list, if any.
+    ///
+    /// Some librdkafka calls (e.g. `rd_kafka_pause_partitions`) always return
+    /// `RD_KAFKA_RESP_ERR_NO_ERROR` and report failures only through each element's `err`.
+    var firstPartitionError: rd_kafka_resp_err_t? {
+        withListPointer { list -> rd_kafka_resp_err_t? in
+            for idx in 0..<Int(list.pointee.cnt) where list.pointee.elems[idx].err != RD_KAFKA_RESP_ERR_NO_ERROR {
+                return list.pointee.elems[idx].err
+            }
+            return nil
+        }
+    }
 }
 
 extension RDKafkaTopicPartitionList: Sendable {}

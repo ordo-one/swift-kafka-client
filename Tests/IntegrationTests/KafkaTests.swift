@@ -310,6 +310,20 @@ final class KafkaTests: XCTestCase {
             } catch {
                 // Expected.
             }
+            let closedPartitions = KafkaTopicList()
+            closedPartitions.append(topic: .init(self.uniqueTestTopic, .init(rawValue: 0), .beginning))
+            do {
+                try await stream.pause(closedPartitions)
+                XCTFail("pause() should throw on a closed stream")
+            } catch {
+                // Expected.
+            }
+            do {
+                try await stream.resume(closedPartitions)
+                XCTFail("resume() should throw on a closed stream")
+            } catch {
+                // Expected.
+            }
 
             // Idempotent.
             try await stream.close()
@@ -363,6 +377,151 @@ final class KafkaTests: XCTestCase {
 
             await serviceGroup.triggerGracefulShutdown()
         }
+    }
+
+    /// A paused partition delivers nothing new, even while records are produced to it; after
+    /// `resume()` the stream picks up exactly where it stopped.
+    func testConsumerStreamPauseResume() async throws {
+        let firstBatch = Self.createTestMessages(topic: self.uniqueTestTopic, count: 10)
+        let secondBatch = Self.createTestMessages(topic: self.uniqueTestTopic, count: 10)
+        // `_sendAndAcknowledgeMessages` iterates the producer's (unicast) event sequence, so each
+        // batch gets its own producer.
+        let (producer, events) = try KafkaProducer.makeProducerWithEvents(configuration: self.producerConfig, logger: .kafkaTest)
+        let (producer2, events2) = try KafkaProducer.makeProducerWithEvents(configuration: self.producerConfig, logger: .kafkaTest)
+
+        var config = KafkaConsumerConfiguration(
+            consumptionStrategy: .partitions(partitions: [
+                .init(partition: .init(rawValue: 0), topic: self.uniqueTestTopic, offset: .beginning),
+            ]),
+            bootstrapBrokerAddresses: [self.bootstrapBrokerAddress]
+        )
+        config.autoOffsetReset = .beginning
+        config.broker.addressFamily = .v4
+        config.pollInterval = .milliseconds(10)
+
+        let serviceGroupConfiguration = ServiceGroupConfiguration(services: [producer, producer2], logger: .kafkaTest)
+        let serviceGroup = ServiceGroup(configuration: serviceGroupConfiguration)
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await serviceGroup.run()
+            }
+
+            try await Self.sendAndAcknowledgeMessages(producer: producer, events: events, messages: firstBatch)
+
+            let stream = try await KafkaConsumerStream(configuration: config, logger: .kafkaTest)
+
+            var consumed = try await Self.consume(from: stream, count: firstBatch.count)
+            XCTAssertEqual(firstBatch.count, consumed.count)
+
+            let partitions = KafkaTopicList()
+            partitions.append(topic: .init(self.uniqueTestTopic, .init(rawValue: 0), .beginning))
+            try await stream.pause(partitions)
+
+            try await Self.sendAndAcknowledgeMessages(producer: producer2, events: events2, messages: secondBatch)
+
+            // Nothing may arrive while the partition is paused. The first batch was consumed in
+            // full beforehand, so no record could have been buffered ahead of the pause.
+            let whilePaused = await Self.collectMessages(from: stream, for: .seconds(2))
+            XCTAssertEqual(0, whilePaused.count, "a paused partition must not deliver records")
+
+            try await stream.resume(partitions)
+            consumed.append(contentsOf: try await Self.consume(from: stream, count: secondBatch.count))
+
+            try await stream.close()
+
+            let expected = firstBatch + secondBatch
+            XCTAssertEqual(expected.count, consumed.count)
+            for (index, message) in consumed.enumerated() where index < expected.count {
+                XCTAssertEqual(ByteBuffer(string: expected[index].key!), message.key)
+                XCTAssertEqual(ByteBuffer(string: expected[index].value!), message.value)
+            }
+            // Release the messages before `stream`: a fetch event outliving the client deadlocks
+            // `rd_kafka_destroy`.
+            consumed.removeAll()
+
+            await serviceGroup.triggerGracefulShutdown()
+        }
+    }
+
+    /// librdkafka reports pause/resume failures per partition rather than through the return
+    /// value; the wrapper must surface them.
+    func testConsumerStreamPauseUnknownPartitionThrows() async throws {
+        var config = KafkaConsumerConfiguration(
+            consumptionStrategy: .partitions(partitions: [
+                .init(partition: .init(rawValue: 0), topic: self.uniqueTestTopic, offset: .beginning),
+            ]),
+            bootstrapBrokerAddresses: [self.bootstrapBrokerAddress]
+        )
+        config.broker.addressFamily = .v4
+        config.pollInterval = .milliseconds(10)
+
+        let stream = try await KafkaConsumerStream(configuration: config, logger: .kafkaTest)
+
+        // Must be a topic the client has never seen: for a known topic librdkafka silently adds
+        // any partition number as a "desired" partition, so the lookup never fails.
+        let unknown = KafkaTopicList()
+        unknown.append(topic: .init("unknown-\(UUID().uuidString)", .init(rawValue: 0), .beginning))
+        do {
+            try await stream.pause(unknown)
+            XCTFail("pausing an unknown partition should throw")
+        } catch is KafkaError {
+            // Expected.
+        }
+        do {
+            try await stream.resume(unknown)
+            XCTFail("resuming an unknown partition should throw")
+        } catch is KafkaError {
+            // Expected.
+        }
+
+        try await stream.close()
+    }
+
+    /// Consume exactly `count` records from a stream whose partitions are assigned up front.
+    private static func consume(
+        from stream: KafkaConsumerStream,
+        count: Int,
+        timeout: Duration = .seconds(30)
+    ) async throws -> [KafkaConsumerStream.Message] {
+        let task = Task { () -> [KafkaConsumerStream.Message] in
+            var messages = [KafkaConsumerStream.Message]()
+            while messages.count < count, let event = await stream.nextEvent() {
+                if case let .fetch(fetch) = event {
+                    messages.append(contentsOf: fetch)
+                }
+            }
+            return messages
+        }
+        let timeoutTask = Task {
+            try await Task.sleep(for: timeout)
+            task.cancel()
+        }
+        defer { timeoutTask.cancel() }
+        let messages = await task.value
+        if messages.count < count {
+            XCTFail("timed out after \(timeout): consumed \(messages.count) of \(count) records")
+        }
+        return messages
+    }
+
+    /// Collect whatever records the stream delivers within `duration`.
+    private static func collectMessages(
+        from stream: KafkaConsumerStream,
+        for duration: Duration
+    ) async -> [KafkaConsumerStream.Message] {
+        let task = Task { () -> [KafkaConsumerStream.Message] in
+            var messages = [KafkaConsumerStream.Message]()
+            while let event = await stream.nextEvent() {
+                if case let .fetch(fetch) = event {
+                    messages.append(contentsOf: fetch)
+                }
+            }
+            return messages
+        }
+        try? await Task.sleep(for: duration)
+        task.cancel()
+        return await task.value
     }
 
     /// `close()` must complete even when the task calling it has already been cancelled — that is

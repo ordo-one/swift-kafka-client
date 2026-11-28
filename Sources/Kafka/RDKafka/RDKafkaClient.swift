@@ -678,6 +678,36 @@ public final class RDKafkaClient: Sendable {
         }
     }
 
+    /// Pause consumption for the given partitions (application-level pause).
+    ///
+    /// `rd_kafka_pause_partitions` blocks until the pause has been applied to every partition and
+    /// reports failures per partition, so both the return value and the list are checked.
+    /// - Parameter topicPartitionList: Pointer to a list of topics + partition pairs.
+    func pausePartitions(_ topicPartitionList: RDKafkaTopicPartitionList) async throws {
+        try await self.performBlockingCallFor(topicPartitionList) { rd_kafka_pause_partitions(self.kafkaHandle, $0) }
+    }
+
+    /// Resume consumption for partitions previously paused with ``pausePartitions(_:)``.
+    /// - Parameter topicPartitionList: Pointer to a list of topics + partition pairs.
+    func resumePartitions(_ topicPartitionList: RDKafkaTopicPartitionList) async throws {
+        try await self.performBlockingCallFor(topicPartitionList) { rd_kafka_resume_partitions(self.kafkaHandle, $0) }
+    }
+
+    private func performBlockingCallFor(
+        _ topicPartitionList: RDKafkaTopicPartitionList,
+        _ call: @escaping (UnsafeMutablePointer<rd_kafka_topic_partition_list_t>) -> rd_kafka_resp_err_t
+    ) async throws {
+        let result = await performBlockingCall(queue: self.gcdQueue) {
+            topicPartitionList.withListPointer(call)
+        }
+        if result != RD_KAFKA_RESP_ERR_NO_ERROR {
+            throw KafkaError.rdKafkaError(wrapping: result)
+        }
+        if let error = topicPartitionList.firstPartitionError {
+            throw KafkaError.rdKafkaError(wrapping: error)
+        }
+    }
+
     /// Seek for partitions to consume.
     /// - Parameter topicPartitionList: Pointer to a list of topics + partition pairs.
     func seek(topicPartitionList: RDKafkaTopicPartitionList, timeout: Duration) async throws {
